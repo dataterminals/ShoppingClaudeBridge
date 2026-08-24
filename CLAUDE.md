@@ -111,6 +111,13 @@ baseline above. To set up a second machine:
 git clone git@github.com:dataterminals/AmazonClaudeBridge-plugin.git plugin
 node bin/skill-drift.js --check
 ```
+On a machine whose git talks to GitHub over HTTPS, that SSH URL fails with `Host key verification
+failed` before it ever reaches auth. Use the `gh` credential path instead — same result, no keys
+to place:
+
+```bash
+gh repo clone dataterminals/AmazonClaudeBridge-plugin plugin
+```
 Porting is deliberately manual, because unlike `bin/vendor.js` there is no mechanical transform
 between the two: a human decides which changes are generic and which are personal.
 
@@ -143,3 +150,9 @@ Three rules:
   hands over the entire order history as CSV, once, with no maintenance. Use that.
 - **Price** comes from `#corePrice_feature_div`'s *first* `.a-offscreen`; the second is the unit
   price. If a price ever reads suspiciously low, that ordering is the first thing to check.
+- **Search-row `was`** is the same trap one level down, and it bit: through v0.4.0 the fallback
+  `.a-text-price .a-offscreen` matched the per-unit block, because Amazon nests
+  `span.a-price.a-text-price` for "($0.83/feet)" inside `span.a-size-base.a-color-secondary`.
+  On 2026-08-23, 7 of the 10 rows carrying a `was` reported it *below* their own price. Fixed in
+  v0.4.1 by narrowing the fallback to a `>` chain that cannot enter that wrapper. The invariant
+  worth remembering is cheap to check and was never checked: **`was` must exceed `price`.**

@@ -58,7 +58,7 @@
 (function () {
   function __amzxLib() {
   'use strict';
-  const VERSION = '0.4.0';
+  const VERSION = '0.4.1';
 
   /* ---------------------------------------------------------------- utils */
 
@@ -242,7 +242,16 @@
       title:      ['[data-cy="title-recipe"] h2 span', 'h2 a span', 'h2 span', 'h2'],
       link:       ['[data-cy="title-recipe"] a', 'h2 a', 'a.a-link-normal.s-no-outline'],
       price:      ['[data-cy="price-recipe"] .a-price .a-offscreen', '.a-price .a-offscreen'],
-      wasPrice:   ['[data-a-strike="true"] .a-offscreen', '.a-text-price .a-offscreen'],
+      // #1 is the only markup Amazon reliably reserves for a strike-through list price. The
+      // fallback used to be a bare `.a-text-price .a-offscreen`, which also matched the PER-UNIT
+      // block: Amazon nests `span.a-price.a-text-price` for "($0.83/feet)" inside
+      // `span.a-size-base.a-color-secondary`, so on 2026-08-23 ("usb c cable") 7 of the 10 rows
+      // carrying a `was` reported it BELOW their own price — $0.83 against $9.99. The `>` chain
+      // cannot reach into that wrapper; it matched exactly the same 7 of 22 rows as #1 did, and
+      // never a unit price. Same family of bug as the product-side note in CLAUDE.md: when a
+      // price reads too low, suspect the unit price first.
+      wasPrice:   ['[data-a-strike="true"] .a-offscreen',
+                   ':not(.a-color-secondary) > .a-price.a-text-price > .a-offscreen'],
       unitPrice:  ['.a-price ~ span.a-size-base.a-color-secondary', '.a-size-base.a-color-secondary'],
       rating:     ['[data-cy="reviews-block"] .a-icon-alt', '.a-icon-star-small .a-icon-alt',
                    '.a-icon-star .a-icon-alt', 'i.a-icon-star-small span'],
