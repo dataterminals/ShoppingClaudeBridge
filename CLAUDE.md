@@ -64,6 +64,7 @@ broken selector than a genuinely sparse product.
 6. **Run the suites after any change.** All zero-dependency, plain node:
    `node tests/parse.test.js` (parsers), `node tests/orders.test.js` (order ingest),
    `node tests/vendor.test.js` + `node bin/vendor.js --check` (the injected asset matches source),
+   `node tests/package.test.js` (the bundle writer),
    `node bin/skill-drift.js --check` (the two skills are in step).
 
 7. **Do not re-add a fetch path — of either kind.** Sub-page fetching was removed in v0.2.0: the
@@ -120,6 +121,26 @@ gh repo clone dataterminals/AmazonClaudeBridge-plugin plugin
 ```
 Porting is deliberately manual, because unlike `bin/vendor.js` there is no mechanical transform
 between the two: a human decides which changes are generic and which are personal.
+
+### Building the bundle to hand to Cowork
+
+```bash
+node bin/package.js            # -> amazon-claude-bridge.plugin in the repo root (gitignored)
+node bin/package.js --list     # what would go in, without writing
+```
+
+A `.plugin` is a zip with `.claude-plugin/plugin.json` at the **archive root**, and the bundler
+refuses to write one unless `vendor.js --check` and `skill-drift.js --check` both pass **and**
+`plugin/`'s copy of `amzx.min.js` is byte-identical to the vendored one. That last gate is the
+point of the script: `vendor.js` cannot see `plugin/`, so the bundled copy is hand-maintained and
+is the one that silently falls behind — a stale bundle just injects last month's library on every
+machine without the userscript, and says nothing.
+
+Output is deterministic (fixed 1980 timestamps), so `sha256` of a bundle answers "is this the
+build I already handed over?". **Do not substitute `Compress-Archive` or
+`ZipFile.CreateFromDirectory`**: both write backslash entry names, which is off-spec — the archive
+looks correct in Explorer and arrives at a strict extractor as one file called
+`skills\amazon-shopping\SKILL.md`. That is why the container is written by hand.
 
 ## Order history
 
