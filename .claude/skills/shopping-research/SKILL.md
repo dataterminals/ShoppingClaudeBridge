@@ -50,8 +50,12 @@ mcp__claude-in-chrome__select_browser            # commit to one
 ```
 
 One browser connected: select it and carry on without asking. Two or more: ask once, quoting the
-labels you were given back to the user. This also settles Tier 1 vs Tier 2 before you spend
-anything discovering it, because the userscripts are installed per-browser.
+labels you were given back to the user. If those labels are unhelpfully generic, tell them the
+browsers can be renamed in the Chrome extension — it is a one-time fix that removes this question
+permanently.
+
+This also settles Tier 1 vs Tier 2 before you spend anything discovering it, because the
+userscripts are installed per-browser.
 
 **Use claude-in-chrome, not an in-app or cloud browser.** Prices, Prime eligibility, delivery
 estimates, eBay's location-based postage quotes and the `Purchased …` badge all depend on the
