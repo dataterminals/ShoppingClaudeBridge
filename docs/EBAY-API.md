@@ -71,6 +71,7 @@ Never interact with the challenge, and never loop.
         "shipping": { "text": "+$5.80 delivery", "cost": 5.8 },
         "total": 15.75,
         "saleFormat": "bin",
+        "bestOffer": true,
         "watchers": 10
       }
     ],
@@ -99,7 +100,11 @@ items" carousel using the same card markup, whose entries also appear below. `sc
 nodes were examined and `duplicatesDropped` appears when any were collapsed.
 
 **`_auctionWarn`** appears when any row is an auction. `price` on those rows is the current bid
-and will rise; `saleFormat` is `auction`, `bin`, or `auction+bin`.
+and will rise. `saleFormat` is `auction`, `bin`, `auction+bin`, or **`unknown`** — never a silent
+default. `bin` is set by *Buy It Now* **or** *or Best Offer*, since eBay renders fixed-price-with-
+offers without a Buy It Now row; reading only the latter left 51 of 65 rows unclassified on a
+Buy-It-Now-only search. `bestOffer: true` marks the negotiable ones. `_formatWarn` counts the
+unknowns, and `rowsWithoutTotal` / `_totalWarn` count rows whose shipping could not be read.
 
 Shipping has three distinguishable states:
 
@@ -161,9 +166,14 @@ the page:
 
 **`specifics` beats the title where they disagree.** One listing titled *"Men's 8 / Women's 9"*
 carried `US 8 / UK 7 / EU 40.5` in its own specifics, and Vans men's 8 is women's 9.5 — the seller
-converted by hand and got it wrong by half a size. `styleCode` (from `Model` / `MPN`) is the only
-reliable colorway identifier on a platform where one shoe is listed as "Burnt Ochre", "Tan" and
-"Brown" by three different sellers.
+converted by hand and got it wrong by half a size.
+
+`styleCode` reads **`Style Code`, then `MPN`, then `Model`** — the order matters. Until 0.3.0 it
+checked `Model` first, which is a model-*family* name shared by every colorway (item
+186246168843: `Model: "Sk8-Hi Mte-1"`, `Style Code: "VN0A5HZYY49"`), so the field returned the
+opposite of what it documents. It is the only reliable colorway identifier on a platform where one
+shoe is listed as "Burnt Ochre", "Tan" and "Brown" by three different sellers, and dedupe depends
+on it.
 
 ---
 

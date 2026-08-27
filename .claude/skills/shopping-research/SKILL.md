@@ -28,7 +28,9 @@ constant, so `price` is a decision-grade number by itself. On eBay every one of 
 variable the seller sets, and `price` alone is **wrong**:
 
 - Shipping ranged $0.00–$19.00 across one real run. On a live 60-row search, **57 of 60 positions
-  changed** when sorted by `total` instead of `price`. Always rank eBay on `total`.
+  changed** when sorted by `total` instead of `price`; a re-measure on a different query the same
+  day gave 47 of 60. Both are snapshots of one page — the magnitude is the durable point, not the
+  constant. Always rank eBay on `total`.
 - Returns has three states, not two, and the gap between "seller pays" and "no returns" is worth
   more than $15 of sticker price on anything that might not fit.
 - Condition is seller-asserted and unverified.
@@ -53,6 +55,13 @@ One browser connected: select it and carry on without asking. Two or more: ask o
 labels you were given back to the user. If those labels are unhelpfully generic, tell them the
 browsers can be renamed in the Chrome extension — it is a one-time fix that removes this question
 permanently.
+
+> **The ordinals are not trustworthy — quote the deviceId instead.** Observed 2026-08-27: a row
+> presented by `list_connected_browsers` as "Browser 1 (Windows)" reported back as *"Connected to
+> browser Browser 2"* on `select_browser`. The labels are crossed, so quoting them back can send
+> the run to the wrong machine while everyone believes otherwise. The deviceId is the only
+> identifier that survived contact.
+
 
 This also settles Tier 1 vs Tier 2 before you spend anything discovering it, because the
 userscripts are installed per-browser.
@@ -93,6 +102,12 @@ which differ per site and where getting it wrong is a material error.
 
 ### Getting the library: a three-tier ladder, in order
 
+> **Give it a moment before you conclude it is missing.** The userscripts run at `document-idle`,
+> so a probe fired immediately after `navigate` returns `undefined` on a machine where the script
+> *is* installed — measured: `undefined` at 0 s, `object` after ~4 s. Poll up to **5 × 500 ms**
+> before dropping a tier. On a genuinely unequipped machine the poll still comes back undefined,
+> so this costs one second there and saves a 21–32 KB injection everywhere else.
+
 **Tier 1 — the installed userscript. This is the happy path.** If `typeof __amzx !== 'undefined'`
 (or `__ebayx` on eBay), use it. Zero cost, zero injection. This is the normal case on an
 operator's own machine, which is where most work happens. Try this first and expect it to succeed.
@@ -112,9 +127,11 @@ announced when this skill loads; if it is not to hand:
 find ~/.claude /root/.claude -path '*shopping-research/assets/*.min.js' 2>/dev/null
 ```
 
-That cost is roughly what one raw search-results read costs, so it pays for itself the moment you
-make two calls on the same page — and it is pure waste if you inject it to read one field. Prefer
-Tier 1 deliberately rather than falling into Tier 2 by habit. **Inject only the site you are on.**
+**That cost is per PAGE, not per session.** The injected library does not survive a navigation —
+verified — so a three-page comparison on Tier 2 pays it three times. It is roughly what one raw
+search-results read costs, so it pays for itself the moment you make two calls on the same page,
+and it is pure waste if you inject it to read one field. Prefer Tier 1 deliberately rather than
+falling into Tier 2 by habit. **Inject only the site you are on.**
 
 **Tier 3 — stop.** No library and no vendored asset: name the missing capability and stop. You may
 read the page with ordinary browser tools as an explicitly labelled degraded mode, but say so, and
@@ -144,12 +161,13 @@ expect it to cost 10–30× the tokens.
 2. `await __amzx.full()` / `await __ebayx.full()`. Both are async; return the call directly, the
    eval has REPL semantics and top-level `await` works.
 3. Check `_missing` and `_warn` on **every** result before trusting it. `full()` lifts both onto
-   the top level, so the envelope is enough — you do not have to remember which nested key a hole
-   was reported under. (Before 0.2.0 it did not, and this instruction quietly returned a clean
-   bill of health on a holed record.) `_missing` carries full paths like `item.condition`;
-   `_warn` names where the caveat prose lives. A thin capture is far more often a broken selector
-   than a genuinely sparse product — if either is substantial, run `health()` before believing
-   anything.
+   the top level, so you do not have to remember which nested key a hole was reported under.
+   (Before 0.2.0 it did not, and this instruction quietly returned a clean bill of health on a
+   holed record.) `_missing` carries full paths like `item.condition` and is complete on its own.
+   **`_warn` is a pointer, not the warning** — it names which sub-records carry caveat prose, and
+   you still have to go read what they say. A capture whose envelope says
+   `search._warn` and gets reported without the sponsored caveat has made exactly the error that
+   caveat exists to prevent.
 4. Report as a comparison table, not prose.
 
 **Extra data costs a navigation, not an option flag.** Neither library makes network requests.

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopping Claude Bridge — Amazon
 // @namespace    https://github.com/dataterminals/ShoppingClaudeBridge
-// @version      0.5.1
+// @version      0.6.0
 // @description  Read-only extractor library for amazon.com. Exposes window.__amzx so an assistant driving the browser can pull a compact, de-sponsored JSON record of the current page instead of reading a 60 KB accessibility tree. Never clicks a buy control, submits a form, or reads credentials.
 // @author       dataterminals
 // @homepageURL  https://github.com/dataterminals/ShoppingClaudeBridge
@@ -58,7 +58,7 @@
 (function () {
   function __amzxLib() {
   'use strict';
-  const VERSION = '0.5.1';
+  const VERSION = '0.6.0';
 
   // --8<-- shared core: START. Byte-identical across every *.user.js in src/.
   // Verify with `node tests/core-parity.test.js`. These markers are `//` on purpose:
@@ -335,7 +335,12 @@
                    '.couponLabelText', '#vpcButton .a-color-success'],
       image:      ['#landingImage', '#imgTagWrapperId img', '#main-image-container img'],
       breadcrumb: ['#wayfinding-breadcrumbs_feature_div'],
-      bullets:    ['#feature-bullets li span.a-list-item', '#featurebullets_feature_div li span'],
+      // #feature-bullets is GONE on apparel — verified 2026-08-27 on B0949M2KTN and B09FKF4HWL,
+      // where it does not exist at all and health() correctly reported bullets BROKEN. The block
+      // moved to #productFactsDesktopExpander, which is where fit, material and care notes live —
+      // exactly what a sizing question turns on.
+      bullets:    ['#feature-bullets li span.a-list-item', '#featurebullets_feature_div li span',
+                   '#productFactsDesktopExpander li', '#feature-bullets li'],
       // Anchor on the badge's own text node, not the wrapper div — the wrapper is present
       // (holding only CSS) even when the product has no badge. txtOf() strips the CSS, but
       // naming the text element keeps this honest if that helper is ever changed.
@@ -355,7 +360,15 @@
       results:    ['div.s-main-slot div[data-component-type="s-search-result"][data-asin]',
                    'div[data-component-type="s-search-result"][data-asin]',
                    'div.s-result-item[data-asin]'],
-      title:      ['[data-cy="title-recipe"] h2 span', 'h2 a span', 'h2 span', 'h2'],
+      // Amazon SPLIT these on footwear and the h2 kept only the brand. Verified 2026-08-27 on
+      // `k=vans+filmore+hi`: 44 of 47 rows returned a single-token title ("Vans"), with the model
+      // name — the only thing distinguishing a Filmore from an Ashwood — sitting in a sibling
+      // anchor. `a.s-line-clamp-2` resolved on 47 of 47 there AND on 22 of 22 for `usb c cable`,
+      // where the h2 still holds a full title, so it is safe as the primary candidate. searchRow
+      // recombines brand + name; see titleBrand.
+      title:      ['[data-cy="title-recipe"] a.s-line-clamp-2', '[data-cy="title-recipe"] h2 span',
+                   'h2 a span', 'h2 span', 'h2'],
+      titleBrand: ['[data-cy="title-recipe"] h2 span', 'h2 span'],
       link:       ['[data-cy="title-recipe"] a', 'h2 a', 'a.a-link-normal.s-no-outline'],
       price:      ['[data-cy="price-recipe"] .a-price .a-offscreen', '.a-price .a-offscreen'],
       // #1 is the only markup Amazon reliably reserves for a strike-through list price. The
@@ -513,14 +526,14 @@
 
   function specs() {
     const out = {};
-    for (const tr of $$(SEL.product.specRows.join(','))) {
+    for (const tr of pickAll(SEL.product.specRows)) {
       const k = txtOf($('th', tr));
       const v = txtOf($('td', tr));
       if (k && v && Object.keys(out).length < 30) out[k] = clip(v, 120);
     }
     // Older layout: "Key : Value" inside a bullet list with two nested spans.
     if (!Object.keys(out).length) {
-      for (const li of $$(SEL.product.detailList.join(','))) {
+      for (const li of pickAll(SEL.product.detailList)) {
         const spans = $$('span', li);
         if (spans.length >= 2) {
           const k = (clean(spans[0].textContent) || '').replace(/[\s:\u200E\u200F]+$/, '');
@@ -553,7 +566,7 @@
   function brandName() {
     const byline = pickText(SEL.product.byline);
     if (byline) return byline.replace(/^(Visit the |Brand: )/i, '').replace(/ Store$/i, '');
-    for (const tr of $$(SEL.product.brandRow.join(','))) {
+    for (const tr of pickAll(SEL.product.brandRow)) {
       const cells = $$('td,th', tr);
       if (cells.length >= 2 && /^brand$/i.test(txtOf(cells[0]) || '')) return txtOf(cells[1]);
     }
@@ -562,7 +575,7 @@
 
   function product() {
     const S = SEL.product;
-    const asinEl = $(S.asinInput.join(','));
+    const asinEl = pick(S.asinInput);
     const asin = clean(asinEl ? asinEl.value : null) || asinFrom(location.href);
     const priceRaw = pickText(S.price);
     const rec = {
@@ -590,7 +603,7 @@
         pickText(S.badgeBest) ? 'Best Seller' : null,
       ]),
       category: clip($$(S.breadcrumb[0] + ' a').map((a) => clean(a.textContent)).filter(Boolean).join(' > '), 120),
-      bullets: $$(S.bullets.join(',')).map((e) => clip(e.textContent, 160)).filter(Boolean).slice(0, 8),
+      bullets: pickAll(S.bullets).map((e) => clip(e.textContent, 160)).filter(Boolean).slice(0, 8),
       specs: specs(),
       image: pickAttr(S.image, 'data-old-hires') || pickAttr(S.image, 'src'),
     };
@@ -612,6 +625,20 @@
     // Belt and braces: the word can appear as a bare label node with no stable class.
     const lbl = $('.puis-label-popover, .a-color-secondary', el);
     return /^\s*Sponsored\b/i.test(clean(lbl ? lbl.textContent : null) || '');
+  }
+
+  // Amazon renders the brand and the product name as separate elements on current footwear
+  // cards, so neither alone is a usable title: the h2 gives "Vans" and the anchor gives
+  // "Women's Filmore Hi Sneaker". Recombine, but only when the name does not already start with
+  // the brand — on categories where the anchor still holds the full title, prefixing would
+  // produce "Anker Anker USB C Cable".
+  function rowTitle(el) {
+    const S = SEL.search;
+    const name = pickText(S.title, el);
+    const brand = pickText(S.titleBrand, el);
+    if (!name) return clip(brand, 140);
+    if (!brand || name.toLowerCase().indexOf(brand.toLowerCase()) === 0) return clip(name, 140);
+    return clip(brand + ' ' + name, 140);
   }
 
   function searchResults(opts) {
@@ -643,7 +670,7 @@
       out.push(compact({
         pos,
         asin,
-        title: clip(pickText(S.title, el), 140),
+        title: rowTitle(el),
         price: money(priceRaw),
         was: money(pickText(S.wasPrice, el)),
         stars: starsM ? parseFloat(starsM[1]) : null,
@@ -677,7 +704,7 @@
     opts = opts || {};
     const S = SEL.buyagain;
     const limit = opts.limit == null ? 40 : opts.limit;
-    const rows = $$(S.row[0]).length ? $$(S.row[0]) : $$(S.row.join(','));
+    const rows = pickAll(S.row);
     if (!rows.length) {
       return { _needs: 'navigate to https://www.amazon.com/gp/buyagain — no Buy Again cards on '
         + 'this page. If you ARE on that URL, the anchor selector has rotted: run __amzx.health()' };
@@ -715,7 +742,7 @@
       // "Subscribe & Save $9.50". Reported as a list because the cheaper one is frequently
       // NOT the price on the card, which is the same shape of finding as offers() on a product.
       const offers = [];
-      for (const p of $$(S.bPill.join(','), cell)) {
+      for (const p of pickAll(S.bPill, cell)) {
         const t = clean(p.innerText || p.textContent);
         if (!t) continue;
         const cut = t.indexOf('$');
@@ -763,10 +790,10 @@
     opts = opts || {};
     const S = SEL.reviews;
     const limit = opts.limit == null ? 8 : opts.limit;
-    const allCards = $$(S.card.join(','), doc);
+    const allCards = pickAll(S.card, doc);
     const cards = allCards.slice(0, limit);
     const dist = {};
-    const pcts = $$(S.histPct.join(','), doc)
+    const pcts = pickAll(S.histPct, doc)
       .map((e) => txtOf(e))
       .filter((x) => /^\d{1,3}%$/.test(x || ''))
       .slice(0, 5);
@@ -851,7 +878,7 @@
   // shows one seller and the cheapest is frequently not it.
   function offers() {
     const S = SEL.offers;
-    const rows = $$(S.row.join(','));
+    const rows = pickAll(S.row);
     if (!rows.length) {
       return { _needs: 'navigate to https://www.amazon.com/dp/' + (asinFrom(location.href) || '<ASIN>') +
         '?aod=1 — the all-sellers panel renders client-side and is not on the plain product page' };

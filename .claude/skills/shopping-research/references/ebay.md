@@ -25,7 +25,8 @@ the grade before the colon — `"Pre-owned - Good"`. If you ever see `condition`
 Every search row and item carries `{price, shipping, total}`. `total` is the sort key.
 
 On a live 60-row search for "vans sk8-hi womens 9", **57 of 60 positions changed** between the two
-orderings. A worked example from that page: `$8.99 + $8.07 = $17.06` ranks *below*
+orderings; a re-measure on a different query the same day gave 47 of 60. Both are snapshots of one
+page — the magnitude is the durable claim, not the constant. A worked example from that page: `$8.99 + $8.07 = $17.06` ranks *below*
 `$9.95 + $5.80 = $15.75`, and sticker price says the opposite. Postage is a seller margin lever on
 eBay in a way it is not on Amazon.
 
@@ -44,6 +45,11 @@ Two shipping states are distinct and must not be collapsed:
 A result card's size aspect (`Brand New · VANS · US W 9`) is a listing **aspect**, not an
 inventory check. Verified on item `225056546791`: the card advertised `US W 9` while the listing's
 own variant map marks 9.0 US Women **out of stock**. Good seller, good price, wrong reality.
+
+**It is also only populated when eBay's own size facet is applied.** Measured: 0 of 60 rows on an
+unfiltered search carried a `sizeHint`, against 37 of 40 on a facet-filtered one. That is correct
+behaviour — it reads the subtitle aspect, not the title — but sixty nulls do not mean sixty
+listings without size information, and reading it that way would rule out the whole page.
 
 The field is called `sizeHint` for that reason. Treat it as a filter hint only. **`variants()` on
 the item page is the only stock truth**, and checking it is what kills the listings that look
@@ -110,6 +116,22 @@ Promo cards ("Shop on eBay") are dropped, but by requiring an item id — not by
 Rows are also scoped to the results river and de-duplicated by item id, so the "similar items"
 carousel does not pad the shortlist. `duplicatesDropped` appears when any were collapsed.
 
+## Rows you must not rank, and rows whose price is not a price
+
+`searchResults()` counts both and warns:
+
+| Field | Meaning |
+|---|---|
+| `rowsWithoutTotal` + `_totalWarn` | shipping could not be read, so `total` is absent. Do not rank these against rows that have one — open them instead |
+| `saleFormat: "unknown"` + `_formatWarn` | no readable sale format. Treat `price` as unverified |
+| `duplicatesDropped` | the same listing rendered twice (carousel plus river) and was collapsed |
+
+`saleFormat` is `bin` when the row says *Buy It Now* **or** *or Best Offer* — eBay renders
+fixed-price-with-offers without a Buy It Now row, and reading only the latter left 51 of 65 rows
+on a Buy-It-Now-only search unclassified. What is left over is `'unknown'`, never a silent
+default to `bin`: an auction whose bid text did not parse would otherwise sit in the price column
+looking like a purchase price.
+
 ## Auctions are a different unit of comparison
 
 `price` on an auction row is the **current bid** and will rise. `saleFormat` is one of `auction`,
@@ -157,7 +179,12 @@ Vans men's 8 is women's **9.5**. The seller did the conversion by hand and got i
 size. `item().specifics` surfaces both so you can catch it; a report built off the title ships the
 error downstream.
 
-`styleCode` (from `Model` / `MPN`) is the **only reliable colorway identifier** on a platform where
+`styleCode` reads `Style Code`, then `MPN`, then `Model` — **in that order, and the order is the
+whole point.** Until 0.3.0 it checked `Model` first, which is a model-*family* name shared by every
+colorway: item 186246168843 carries `Model: "Sk8-Hi Mte-1"` and `Style Code: "VN0A5HZYY49"`, and
+the field returned the former. That inverted its own purpose — dedupe on it and three different
+colorways from one seller at one price collapse into a single row. It is the **only reliable
+colorway identifier** on a platform where
 the same shoe is listed as "Burnt Ochre", "Tan" and "Brown" by three different sellers. Use it to
 group and to dedupe.
 

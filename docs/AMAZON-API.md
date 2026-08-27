@@ -3,6 +3,15 @@
 Every call is synchronous except `full()`. (`criticalReviews()` was removed in v0.2.0 and
 `offers()` has been synchronous since the fetch path went with it.)
 
+**Search-row `title` is composed from two elements as of 0.6.0.** On current footwear cards Amazon
+puts the brand in the `h2` and the product name in a sibling anchor, so the old selector returned
+`"Vans"` for 44 of 47 rows. `title` now recombines brand and name, skipping the prefix when the
+name already starts with the brand — on categories where the anchor still holds a full title,
+blind prefixing would produce "Anker Anker USB C Cable".
+
+**`bullets` reads `#productFactsDesktopExpander` too.** `#feature-bullets` is absent outright on
+apparel listings, where the block holds the fit and material notes a sizing question turns on.
+
 **As of 0.5.1, `full()` lifts `_missing` and `_warn` from its sub-records onto the envelope.**
 Before that they lived only where they were produced — `product()._missing` at `.product._missing`
 with `._missing` undefined — so checking the envelope reported a clean capture on a holed record.

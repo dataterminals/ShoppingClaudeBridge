@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopping Claude Bridge — eBay
 // @namespace    https://github.com/dataterminals/ShoppingClaudeBridge
-// @version      0.2.0
+// @version      0.3.0
 // @description  Read-only extractor library for ebay.com. Exposes window.__ebayx so an assistant driving the browser can pull a compact JSON record of the current page instead of reading a 60 KB accessibility tree. Never clicks a control, submits a form, or reads credentials.
 // @author       dataterminals
 // @homepageURL  https://github.com/dataterminals/ShoppingClaudeBridge
@@ -52,7 +52,7 @@
 (function () {
   function __ebayxLib() {
   'use strict';
-  const VERSION = '0.2.0';
+  const VERSION = '0.3.0';
 
   // --8<-- shared core: START. Byte-identical across every *.user.js in src/.
   // Verify with `node tests/core-parity.test.js`. These markers are `//` on purpose:
@@ -371,8 +371,12 @@
   //   * a plain "Something went wrong on our end" error page carrying a trace id
   // The caller's rule is exactly one timed wait, exactly one re-navigation, then stop and
   // report. Never interact with the challenge itself, ever, and never loop.
+  // The healthy-page guard must track the selectors the extractors actually use. It named
+  // .su-card-container directly until 0.3.0, which stopped being the first search candidate when
+  // the doubling bug was fixed — so if eBay dropped that class while keeping .s-card, search
+  // would keep working while this started reporting healthy pages as blocked.
   function blocked() {
-    if ($('.x-item-title__mainTitle') || $('.su-card-container')) return null;
+    if (pick(SEL.item.title) || pickAll(SEL.search.results).length) return null;
     const body = document.body ? document.body.innerText : '';
     if (/splashui|challenge/.test(location.pathname) || /Pardon Our Interruption/i.test(body)) return 'challenge';
     if (/Something went wrong on our end/i.test(body)) return 'transient-error';
@@ -533,10 +537,10 @@
 
   function specifics() {
     const out = {};
-    for (const sec of $$(SEL.item.specSection.join(','))) {
+    for (const sec of pickAll(SEL.item.specSection)) {
       const head = pickText(SEL.item.specHeading, sec) || '';
       if (!/item specifics/i.test(head)) continue;
-      for (const col of $$(SEL.item.specCol.join(','), sec)) {
+      for (const col of pickAll(SEL.item.specCol, sec)) {
         const k = pickText(SEL.item.specLabel, col);
         const v = pickText(SEL.item.specValue, col);
         if (k && v && Object.keys(out).length < 30) out[clean(k).replace(/:$/, '')] = clip(v, 120);
@@ -595,7 +599,13 @@
       // title is seller prose; the specifics are a form. This is also where the only reliable
       // colorway identifier lives, on a platform that lists one shoe as Burnt Ochre, Tan and
       // Brown by three different sellers.
-      styleCode: spec ? (spec.Model || spec.MPN || spec['Style Code'] || null) : undefined,
+      // ORDER MATTERS AND IT WAS BACKWARDS UNTIL 0.3.0. `Model` is a model-FAMILY name shared by
+      // every colorway — verified 2026-08-27 on item 186246168843, whose specifics carry
+      // Model "Sk8-Hi Mte-1" AND Style Code "VN0A5HZYY49". Checking Model first returned the
+      // family name, which inverts this field's whole purpose: the docs call it the only reliable
+      // colorway identifier and prescribe dedupe on (seller, styleCode, price), so the old order
+      // would have collapsed three different colorways from one seller into a single row.
+      styleCode: spec ? (spec['Style Code'] || spec.MPN || spec.Model || null) : undefined,
     }) || {};
 
     const want = ['title', 'price', 'condition', 'seller'];
@@ -618,13 +628,18 @@
     // drops them without having to guess at an ad marker — see the _warn in searchResults().
     if (!id) return null;
 
-    const attrs = $$(S.attrRow.join(','), el).map(txtOf).filter(Boolean);
+    const attrs = pickAll(S.attrRow, el).map(txtOf).filter(Boolean);
     const ship = shippingInfo(attrs.find((t) => /delivery|shipping|postage/i.test(t)));
     const priceRaw = pickText(S.price, el);
     const price = money(priceRaw);
     const bidM = (attrs.find((t) => /\bbids?\b/i.test(t)) || '').match(/(\d+)\s*bids?/i);
     const bids = bidM ? num(bidM[1]) : null;
-    const hasBin = attrs.some((t) => /buy it now/i.test(t));
+    const joined = attrs.join(' ');
+    const hasBin = /buy it now/i.test(joined);
+    // A fixed-price listing with offers enabled renders "or Best Offer" and NO "Buy It Now" row.
+    // Verified 2026-08-27: on an LH_BIN=1 search — where every row is a Buy It Now by definition
+    // — 51 of 65 rows carried neither phrase under the old test and fell through to undefined.
+    const bestOffer = /best offer/i.test(joined);
     const watchM = (attrs.find((t) => /watchers?/i.test(t)) || '').match(/(\d[\d,]*)\s*watchers?/i);
     const locRow = attrs.find((t) => /^Located in/i.test(t));
     const segs = (pickText(S.subtitle, el) || '').split(/\s+·\s+/).map(clean).filter(Boolean);
@@ -644,7 +659,13 @@
       shipping: ship,
       total: price != null && ship && ship.cost != null
         ? Math.round((price + ship.cost) * 100) / 100 : undefined,
-      saleFormat: bids != null ? (hasBin ? 'auction+bin' : 'auction') : (hasBin ? 'bin' : undefined),
+      // 'unknown' rather than undefined, because absence of evidence must not read as "fixed
+      // price". An auction whose bid text did not parse would otherwise land in the same bucket
+      // as a BIN, and its CURRENT BID would sit in the price column looking like a purchase
+      // price — precisely the error _auctionWarn exists to prevent.
+      saleFormat: bids != null ? (hasBin ? 'auction+bin' : 'auction')
+        : (hasBin || bestOffer) ? 'bin' : 'unknown',
+      bestOffer: bestOffer || undefined,
       bids: bids != null ? bids : undefined,
       watchers: watchM ? num(watchM[1]) : undefined,
       from: ship && ship.from ? undefined
@@ -674,11 +695,19 @@
       rows.push(r);
     }
 
+    // Rows the caller must not rank. ebay.md says "do not rank a row without a total against
+    // rows that have one" — which is unactionable if nothing says WHICH rows those are. On a
+    // live 60-row search 6 of them had no total, shipping being absent entirely rather than
+    // unparseable, so item()'s own shipping _warn would not have fired either.
+    const noTotal = rows.filter((r) => r.total == null).length;
+    const unknownFormat = rows.filter((r) => r.saleFormat === 'unknown').length;
+
     const out = compact({
       resultCount: num(pickText(SEL.search.resultCount)),
       shown: rows.length,
       scanned: nodes.length,
       duplicatesDropped: duplicates || undefined,
+      rowsWithoutTotal: noTotal || undefined,
       rows: rows,
     }) || {};
 
@@ -696,6 +725,16 @@
       out._auctionWarn = auctions.length + ' of ' + rows.length + ' rows are auctions, where '
         + '`price` is the CURRENT BID and will rise. Their `total` is not comparable with a '
         + 'Buy It Now row.';
+    }
+    if (unknownFormat) {
+      out._formatWarn = unknownFormat + ' of ' + rows.length + ' rows carry no readable sale '
+        + 'format (saleFormat: "unknown"). Treat their `price` as unverified rather than as a '
+        + 'purchase price — an auction whose bid text did not parse looks identical here, and '
+        + 'its price would rise.';
+    }
+    if (noTotal) {
+      out._totalWarn = noTotal + ' of ' + rows.length + ' rows have no `total` because shipping '
+        + 'could not be read. Do not rank those against rows that have one; open them instead.';
     }
     return out;
   }

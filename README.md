@@ -38,7 +38,8 @@ constant, so `price` is a decision-grade number by itself. On eBay every one of 
 variable the seller sets, and `price` alone is **wrong**.
 
 On a live 60-row eBay search, **57 of 60 positions changed** when sorted by landed cost instead of
-sticker price. `$8.99 + $8.07 = $17.06` ranks below `$9.95 + $5.80 = $15.75`, and the listing
+sticker price; a re-measure on another query gave 47 of 60. Both are snapshots of one page — the
+magnitude is the durable claim, not the constant. `$8.99 + $8.07 = $17.06` ranks below `$9.95 + $5.80 = $15.75`, and the listing
 price says the opposite. So every eBay row carries `{price, shipping, total}` and `total` is the
 sort key.
 

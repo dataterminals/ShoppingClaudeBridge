@@ -28,7 +28,8 @@ add extraction there.
 Amazon is a catalogue; eBay is a market. On Amazon, condition, seller and postage are mostly
 constant, so `price` is decision-grade alone. On eBay all three are seller-set variables and
 `price` without `shipping` is simply **wrong** — on a live 60-row search, 57 of 60 positions
-changed when sorted by `total` instead of `price`. Do not "harmonise" the two record shapes; an
+changed when sorted by `total` instead of `price` (a re-measure on another query gave 47 of 60;
+both are snapshots, the magnitude is the durable claim). Do not "harmonise" the two record shapes; an
 eBay record that looks like an Amazon one is actively misleading.
 
 ## How to use it in a session
@@ -290,6 +291,17 @@ Three rules:
   fallback; it earned its place only because it flagged exactly the same 6-of-22 results as the
   specific classes on 2026-08-20. A false positive here silently hides a real product, which is
   the expensive direction — re-check it if organic counts look low.
+- **Search-row titles are SPLIT into brand and name on footwear, and the h2 keeps only the brand.**
+  Verified 2026-08-27 on `k=vans+filmore+hi`: 44 of 47 rows returned the single token "Vans" — the
+  model name, the only thing distinguishing a Filmore from an Ashwood, lives in a sibling
+  `a.s-line-clamp-2`. `rowTitle()` recombines them, and only prefixes the brand when the name does
+  not already start with it, because on `usb c cable` the anchor still carries the full title and
+  blind prefixing produces "Anker Anker USB C Cable". A single-token title is the tell.
+- **`#feature-bullets` no longer exists on apparel.** Verified on B0949M2KTN and B09FKF4HWL: the
+  container is absent outright and the block moved to `#productFactsDesktopExpander`. `health()`
+  reported this as BROKEN unprompted, which is the system working — the record was bullet-less,
+  not silently truncated. On apparel that block holds fit, material and care notes, which is what
+  a sizing question actually turns on.
 - **Orders pages** have no extractor. Amazon's order history is a React app with per-deploy class
   hashes, and it is the wrong thing to scrape anyway: Amazon's official *Request My Data* export
   hands over the entire order history as CSV, once, with no maintenance. Use that.
@@ -370,6 +382,20 @@ Three rules:
 - **`quantity` absent is normal, not broken.** A single-item listing renders no quantity widget and
   carries no "N available" / "N sold" text at all. It is in `OPTIONAL` for that reason — reporting
   it BROKEN is the cry-wolf failure that makes `health()` worth ignoring.
+- **`styleCode` precedence is load-bearing and was backwards until 0.3.0.** `Model` is a
+  model-*family* name shared by every colorway; `Style Code` is the SKU. Item 186246168843 carries
+  both (`Sk8-Hi Mte-1` and `VN0A5HZYY49`) and the field returned the family name — which inverts
+  its documented purpose, since dedupe on `(seller, styleCode, price)` would then collapse three
+  colorways into one row. Order is `Style Code` → `MPN` → `Model`.
+- **`saleFormat` must never default to `bin`.** eBay renders a fixed-price-with-offers listing as
+  "or Best Offer" with **no** "Buy It Now" row, so testing only for the latter left 51 of 65 rows
+  unclassified on an `LH_BIN=1` search — where every row is a Buy It Now by definition. Both
+  phrases now count, and whatever is left is `'unknown'` with a `_formatWarn`. Absence of evidence
+  must not read as "fixed price": an auction whose bid text failed to parse would otherwise put a
+  rising current bid in the price column, which is the worst-shaped error this library can make.
+- **`sizeHint` only populates when eBay's size facet is applied** — 0 of 60 rows unfiltered, 37 of
+  40 facet-filtered. That is correct (it reads the subtitle aspect) but a reader seeing sixty
+  nulls could conclude the listings carry no size information and rule out the page.
 - **The MSKU anchor is the single point of failure for the best data on the site.** It is a typed
   model name (`"MSKU":{"_type":"VariationViewModel"`), which is far more durable than eBay's
   content-hashed CSS classes — but if it moves, `variants()` returns null and `full()` says so via
