@@ -73,6 +73,17 @@ broken selector than a genuinely sparse product.
    blocked by a safety classifier for exactly that, correctly, and a denial must never be worked
    around by rephrasing. Tier 2 injects the local vendored asset instead.
 
+   **Per-variant prices are not in the twister payload — do not spike this again.** It is the
+   obvious next feature (`variants().available[].price` would collapse a 6-navigation flavour
+   comparison into a field read) and it does not exist. Verified 2026-08-27 on a 7-SKU grocery
+   listing (ASIN withheld — rule 3: it is something the operator has bought, and this repo is
+   public): 217,896 characters of twister blob containing **zero** `$` amounts and zero numeric
+   values. There is no `asinVariationValues` and no `priceAsinData`. Every key in there matching
+   `/price/i` is a *feature-div name* — `corePrice_feature_div`, `twisterPlusPriceSubtotal…` —
+   because Amazon re-renders those slots over AJAX when a variant is picked. The price is fetched
+   on selection, by design. The only price on the page is the selected ASIN's own. So a variant
+   price costs a navigation or a request, and a request is what this rule forbids.
+
    Reviews: **every** parameter is ignored, not just `critical`. `filterByStar=one_star` returns
    eight 4-and-5-star reviews, and the cap is site-wide. If you think you have found a working
    endpoint, check the returned stars actually match the filter before believing it — the old code
@@ -171,6 +182,33 @@ Three rules:
   hands over the entire order history as CSV, once, with no maintenance. Use that.
 - **Price** comes from `#corePrice_feature_div`'s *first* `.a-offscreen`; the second is the unit
   price. If a price ever reads suspiciously low, that ordering is the first thing to check.
+- **Buy Again's anchor is the fragile part, and `[data-asin]` is not it.** `/gp/buyagain` carried
+  **392** valid-looking `[data-asin]` nodes for **24** actual cards on 2026-08-27 — Rufus pills,
+  recommendation strips and promo blocks all stamp one — so a generic anchor over-matches by ~16x
+  and the first hit is not a Buy Again item. `[class*="_gridCell_"]` is not it either: 232 matches,
+  because it is the grid *layout* class and only 24 of those cells held a product. The anchor is
+  `.almGridDesktopAsinInfoSummary`, which is un-hashed and carries `data-asin` directly on all 24.
+  Around it the `_YnV5L_*` classes are content-hashed CSS modules and will rot — match the middle
+  segment (`[class*="_gridOfferRow_"]`) so only the suffix has to hold.
+  **The cart-sidebar exclusion is unverified.** With a non-empty cart Amazon renders `#ewc`, whose
+  rows also carry `data-asin`; the cart was empty when this was probed, so the `:not(#ewc …)` guard
+  on the fallback has never actually been exercised. Re-check it with something in the cart.
+- **`#aod-offer-heading` is a heading slot, not a condition field.** On listings carrying a
+  Subscribe & Save toggle it holds the purchase mode, and through v0.4.1 that arrived as
+  `{"condition": "One-time purchase"}` — a value that is not a condition, reads exactly like one,
+  and was flagged by nothing. v0.5.0 validates against Amazon's actual vocabulary and routes the
+  purchase mode to its own field. Keep `resale` in `CONDITION_RE`: Amazon Resale offers carry
+  "Resale - Like New", and the tighter `/^(new|used)/` would silently drop a real offer. Anything
+  the two validators both reject is preserved as `_heading` — if that field ever starts appearing,
+  Amazon has put a third thing in the slot.
+- **`_dilution` is a risk flag, not a finding**, and it must not be written back into an
+  assertion. Through v0.4.1 it declared that a pooled rating "is not a rating for this variant
+  alone" on *every* multi-SKU listing. That is more than the page supports: on 2026-08-27 a 7-SKU
+  listing served 4.3 / 662 on one child and 4.4 / 531 on a sibling, so Amazon was splitting that
+  pool. Nothing on a single page separates the two cases, which is why there is no confidence
+  score — `_dilutionCheck` names a sibling ASIN and the caller settles it with one navigation. A
+  warning that is always on and sometimes wrong is one the reader learns to skip, and the cost of
+  that lands on the listings where the pooling is total.
 - **Search-row `was`** is the same trap one level down, and it bit: through v0.4.0 the fallback
   `.a-text-price .a-offscreen` matched the per-unit block, because Amazon nests
   `span.a-price.a-text-price` for "($0.83/feet)" inside `span.a-size-base.a-color-secondary`.

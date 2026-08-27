@@ -2,7 +2,7 @@
   "note": "Baseline for bin/skill-drift.js. Hashes only — the plugin skill is personal and is never stored or committed here. Run `node bin/skill-drift.js --accept` after porting a change from one skill to the other.",
   "repoSkill": ".claude/skills/amazon-shopping/SKILL.md",
   "pluginSkill": "plugin/skills/amazon-shopping/SKILL.md (gitignored, local only)",
-  "repoHash": "92253974260cd6ff2396e5546f4e4c818c26e7fda2bacb1a0ed31126921eb130",
-  "pluginHash": "5b65c89f6b22476b344f1584bf0d1ef863033260fbbb6727a003dbd44a77decf",
-  "repoCommit": "d6517516133b93d3768ea88b4645de8c7e958941"
+  "repoHash": "ed02fdcfd836fc996d21ebd02facae1bf978accd932de1010371b1dab3653e9b",
+  "pluginHash": "2651e8f32d64fc1ae9e548bea20bf4f86c413181eee56cf8e63a2c5d320dd547",
+  "repoCommit": "34b77db217e1367acabd17d7495bd1dd78356aa3"
 }

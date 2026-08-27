@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Amazon Claude Bridge
 // @namespace    https://github.com/dataterminals/AmazonClaudeBridge
-// @version      0.4.0
+// @version      0.5.0
 // @description  Read-only extractor library for amazon.com. Exposes window.__amzx so an assistant driving the browser can pull a compact, de-sponsored JSON record of the current page instead of reading a 60 KB accessibility tree. Never clicks a buy control, submits a form, or reads credentials.
 // @author       dataterminals
 // @homepageURL  https://github.com/dataterminals/AmazonClaudeBridge
@@ -58,7 +58,7 @@
 (function () {
   function __amzxLib() {
   'use strict';
-  const VERSION = '0.4.1';
+  const VERSION = '0.5.0';
 
   /* ---------------------------------------------------------------- utils */
 
@@ -171,6 +171,70 @@
     return v === undefined ? null : v;
   };
 
+  // Coupon text is prose, and the number buried in it is usually the largest single lever on the
+  // page — 30% on a $21.85 item bought two at a time is a $13.11 swing. The trap is that the
+  // qualifier shares a sentence with the number: "30% off coupon applied. First Subscribe & Save
+  // orders only." is not a 30% discount, it is a 30% discount *if* you also take a subscription,
+  // which is a decision rather than a price. A comparison table that prints the raw string wraps
+  // or truncates exactly the half that decides the question, so split them here and let the
+  // caller render the number and the condition on it separately.
+  //
+  // Captured live 2026-08-27 on a grocery listing carrying Subscribe & Save.
+  const couponInfo = (s) => {
+    const text = clean(s);
+    if (!text) return null;
+    const pctM = text.match(/(\d{1,3}(?:\.\d+)?)\s*%/);
+    // Amount only when there is no percentage. "10% off, up to $20" carries both numbers and the
+    // $20 is a CAP, not the discount — reporting it as the saving would be the same shape of
+    // error as the unit-price traps elsewhere in this file: a plausible, wrong, silent number.
+    const amtM = pctM ? null : text.match(/\$\s*\d[\d.,]*/);
+    // "coupon applied" is already inside the price shown; "Apply $5 coupon" is not. That decides
+    // whether subtracting this from price.current double-counts it.
+    const applied = /\bapplied\b/i.test(text) ? true : null;
+    const requires =
+      /first\b[^.]*\bsubscribe\s*&?\s*save|subscribe\s*&?\s*save[^.]*\bfirst\b/i.test(text)
+        ? 'first-subscribe-and-save-order'
+      : /subscribe\s*&?\s*save|subscription/i.test(text) ? 'subscribe-and-save'
+      // "when you reorder 5 qualifying items" is live Buy Again copy (2026-08-27). An earlier
+      // `when you (buy|purchase|order)` missed it, because "reorder" does not start at the `o`.
+      : /when you (re)?(buy|purchase|order)|on any \d|buy \d|qualifying items/i.test(text) ? 'multi-buy'
+      : /when you spend|orders? over/i.test(text) ? 'minimum-spend'
+      : /when you select|coupon available when/i.test(text) ? 'select-option'
+      : null;
+    return compact({
+      pct: pctM ? parseFloat(pctM[1]) : null,
+      amount: amtM ? money(amtM[0]) : null,
+      applied,
+      conditional: requires ? true : null,
+      requires,
+      text: clip(text, 120),
+    });
+  };
+
+  // #aod-offer-heading is a HEADING slot, not a condition field, and on listings that carry a
+  // Subscribe & Save toggle it holds the purchase mode instead. Verified 2026-08-27: a grocery
+  // listing returned condition "One-time purchase" while a plain third-party listing the same
+  // day correctly returned "New". There is no such condition as "One-time purchase", and a wrong
+  // condition is worse than an absent one — it reads as real and nothing anywhere flags it.
+  //
+  // So match the vocabulary Amazon actually ships, and return null for everything else.
+  // "Resale" is on the list deliberately: Amazon Resale offers carry "Resale - Like New", so the
+  // tighter /^(new|used)/ that suggests itself first would have silently dropped a real offer.
+  const CONDITION_RE =
+    /^(new|used|renewed|refurbished|certified refurbished|collectible|resale|open box|pre[- ]?owned)\b/i;
+  const condition = (s) => {
+    const c = clean(s);
+    return c && CONDITION_RE.test(c) ? c : null;
+  };
+
+  // The slot's other known tenant, kept rather than discarded: whether a price is the one-time
+  // price or the subscription price is a real difference between two numbers in a table.
+  const PURCHASE_MODE_RE = /^(one[- ]?time purchase|subscribe\s*&?\s*save|subscription)/i;
+  const purchaseMode = (s) => {
+    const c = clean(s);
+    return c && PURCHASE_MODE_RE.test(c) ? c : null;
+  };
+
   const asinFrom = (url) => {
     const m = String(url || '').match(/\/(?:dp|gp\/product|product-reviews)\/([A-Z0-9]{10})/i);
     return m ? m[1].toUpperCase() : null;
@@ -274,6 +338,40 @@
       resultCount:['[data-component-type="s-result-info-bar"] h1 span',
                    '.s-breadcrumb .sg-col-inner span', '#s-result-info-bar-content span'],
     },
+    // Buy Again — /gp/buyagain. Everything here was probed live on 2026-08-27; the numbers in
+    // these comments are that page's, and they are the reason each selector is shaped as it is.
+    //
+    // THE ANCHOR IS THE WHOLE PROBLEM. That page carried 392 valid-looking `[data-asin]` nodes
+    // for 24 actual cards — Rufus pills, recommendation strips and promo blocks all stamp one.
+    // Anchoring on `[data-asin]` therefore returns ~16x garbage, and the first hit is not a Buy
+    // Again item. `[class*="_gridCell_"]` is no better: it matched 232 nodes, because it is the
+    // grid LAYOUT class and most cells hold no product at all (24 of 232 had a price).
+    //
+    // `.almGridDesktopAsinInfoSummary` is the honest anchor: 24 nodes, all 24 carrying
+    // `data-asin` directly on the element, and — the reason to prefer it — it is NOT a hashed
+    // CSS-module name, so it survives a deploy. The `_YnV5L_*` classes around it are content
+    // hashed and will rot; where one is unavoidable, match the middle segment (`_gridOfferRow_`)
+    // rather than the full class, so only the suffix has to stay put.
+    buyagain: {
+      // The `:not()` guards are belt-and-braces for the fallback: with a non-empty cart Amazon
+      // renders the `#ewc` cart sidebar, whose rows also carry `data-asin`, and a generic
+      // anchor returns whatever is sitting in the cart as if it were a Buy Again item. The
+      // cart was empty when this was probed, so that path is UNVERIFIED — it is a guard, not
+      // a tested selector. The primary anchor cannot reach into #ewc regardless.
+      row:        ['.almGridDesktopAsinInfoSummary[data-asin]',
+                   '.alm-grid-desktop-grid-container [data-asin]:not(#ewc [data-asin]):not(.ewc-item)'],
+      grid:       ['.alm-grid-desktop-grid-container'],
+      // One per card on all 24. This is the price container, and scoping to it is what keeps
+      // the offer pills below from being read as the item's price.
+      offerRow:   ['[class*="_gridOfferRow_"]'],
+      // .a-truncate-full is the untruncated title; .a-truncate-cut is the ellipsised one.
+      bTitle:     ['.a-truncate-full', '.a-truncate-cut'],
+      bPrice:     ['.a-price .a-offscreen'],
+      // Subscribe & Save vs one-time. Labels verified verbatim: "One-time purchase" / "Subscribe
+      // & Save" — the same string that leaks into offers().condition, hence purchaseMode().
+      bPill:      ['[class*="_offerPill_"]'],
+      bPromo:     ['[class*="_singlePromotion"]', '[class*="_promotionContent"]'],
+    },
     reviews: {
       card:       ['div[data-hook="review"]', '.review'],
       rTitle:     ['[data-hook="review-title"] span:not(.a-icon-alt)', '[data-hook="review-title"]'],
@@ -312,6 +410,9 @@
   const OPTIONAL = new Set([
     'wasPrice', 'unitPrice', 'coupon', 'badgeChoice', 'badgeBest', 'delivery', 'byline',
     'detailList', 'brandRow', 'thumb', 'link', 'badge', 'histRow', 'rVerified', 'rHelpful',
+    // Buy Again: a card carries a strikethrough list price, a Subscribe & Save pill and a promo
+    // only sometimes — 13, 12 and 10 of 24 respectively on 2026-08-27. Their absence is normal.
+    'bPill', 'bPromo',
     // shipsFrom is absent by design on Amazon-sold items: when soldBy is Amazon.com the page
     // collapses the separate "Ships from" row, because it would just say Amazon.com twice.
     // Third-party listings do render it (verified on an AnkerDirect listing, 2026-08-20).
@@ -324,6 +425,9 @@
 
   function pageType() {
     const p = location.pathname;
+    // Before the others: /gp/buyagain is matched by none of them, so it fell through to
+    // 'unknown' until v0.5.0 and the caller got no extractor on the page a reorder starts from.
+    if (/\/buyagain|\/gp\/buy-again/.test(p)) return 'buyagain';
     if (/\/product-reviews\//.test(p)) return 'reviews';
     if (/\/(dp|gp\/product)\//.test(p)) return 'product';
     if (/^\/s\b/.test(p) || location.search.includes('k=')) return 'search';
@@ -428,7 +532,7 @@
       shipsFrom: clip(pickText(S.shipsFrom), 60),
       soldBy: clip(pickText(S.soldBy), 60),
       delivery: clip(pickText(S.delivery), 80),
-      coupon: clip(pickText(S.coupon), 80),
+      coupon: couponInfo(pickText(S.coupon)),
       badges: compact([
         pickText(S.badgeChoice) ? 'Amazon Choice' : null,
         pickText(S.badgeBest) ? 'Best Seller' : null,
@@ -504,6 +608,96 @@
       resultCountText: clip(pickText(S.resultCount), 80),
       results: out,
     };
+  }
+
+  /* -------------------------------------------------------------- buyagain */
+  //
+  // The page a recurring order actually starts from, and until v0.5.0 it had no extractor at
+  // all — `page()` returned type "unknown", so the caller's only option was to hand-roll a
+  // scraper against a hashed class name and hope. See SEL.buyagain for why the anchor is what
+  // it is; the short version is that `[data-asin]` over-matches by ~16x on this page.
+
+  function buyAgain(opts) {
+    opts = opts || {};
+    const S = SEL.buyagain;
+    const limit = opts.limit == null ? 40 : opts.limit;
+    const rows = $$(S.row[0]).length ? $$(S.row[0]) : $$(S.row.join(','));
+    if (!rows.length) {
+      return { _needs: 'navigate to https://www.amazon.com/gp/buyagain — no Buy Again cards on '
+        + 'this page. If you ARE on that URL, the anchor selector has rotted: run __amzx.health()' };
+    }
+    let wasDropped = 0;
+    const out = [];
+    for (const r of rows) {
+      if (out.length >= limit) break;
+      const asin = r.getAttribute('data-asin');
+      if (!asin || asin.length !== 10) continue;
+      // The card is the summary node's grid cell when there is one; fall back to the node
+      // itself so a layout change degrades to a thinner record rather than to nothing.
+      const cell = (r.closest && r.closest('[class*="_gridCell_"]')) || r;
+      const offerRow = pick(S.offerRow, cell);
+      const price = money(pickText(S.bPrice, offerRow || cell));
+
+      // `was` MUST exceed `price`. CLAUDE.md records that this invariant is cheap and was never
+      // checked, and it bit again here: a bare [data-a-strike="true"] over the whole card
+      // reported was === price on 8 of 13 rows on 2026-08-27, because strike markup outside the
+      // offer row re-renders the CURRENT price. Scoping to the offer row and excluding the
+      // Subscribe & Save pills left 5 rows and zero violations. The check stays in anyway —
+      // a selector that silently starts matching the wrong node is exactly what this catches,
+      // and reporting a `was` below the price is worse than reporting none.
+      let was = null;
+      if (offerRow) {
+        for (const s of $$('[data-a-strike="true"]', offerRow)) {
+          if (s.closest && s.closest('[class*="_offerPill_"]')) continue;
+          const v = money(txtOf($('.a-offscreen', s)) || txtOf(s));
+          if (v != null) { was = v; break; }
+        }
+      }
+      if (was != null && price != null && was <= price) { was = null; wasDropped++; }
+
+      // Alternative purchase modes, as Amazon renders them: "One-time purchase $10.00" /
+      // "Subscribe & Save $9.50". Reported as a list because the cheaper one is frequently
+      // NOT the price on the card, which is the same shape of finding as offers() on a product.
+      const offers = [];
+      for (const p of $$(S.bPill.join(','), cell)) {
+        const t = clean(p.innerText || p.textContent);
+        if (!t) continue;
+        const cut = t.indexOf('$');
+        offers.push(compact({
+          mode: clip(cut > 0 ? t.slice(0, cut) : null, 30),
+          price: money(cut >= 0 ? t.slice(cut) : t),
+        }));
+      }
+
+      out.push(compact({
+        asin,
+        title: clip(pickText(S.bTitle, cell), 140),
+        price,
+        was,
+        // "($9.90/fluid ounce)" rides along in the offer row's text. Taken from the text rather
+        // than a selector because the parenthesised form is the stable part, not its container.
+        unit: (() => { const m = (txtOf(offerRow) || '').match(/\(([^)]*\/[^)]*)\)/); return m ? clip(m[1], 40) : null; })(),
+        offers: offers.length ? offers : null,
+        // Same parser as the product-page coupon: the percentage is worthless without the
+        // condition attached to it, and Buy Again promos are almost all conditional.
+        promo: couponInfo(pickText(S.bPromo, cell)),
+        url: dpUrl(asin),
+      }));
+    }
+
+    const res = {
+      shown: out.length,
+      // Amazon paginates this page behind a "Load more" button. The library does not click
+      // anything (see the header), so say how many are visible and let the caller decide.
+      hasMore: !!$$('button,a,span').filter((b) => /^load more$/i.test(clean(b.innerText) || ''))[0] || undefined,
+      items: out,
+    };
+    if (wasDropped) {
+      res._warn = wasDropped + ' row(s) reported a list price at or below their own price, so it '
+        + 'was dropped. That is the unit-price family of bug — if this count is high, the `was` '
+        + 'selector in SEL.buyagain has rotted.';
+    }
+    return compact(res) || {};
   }
 
   /* --------------------------------------------------------------- reviews */
@@ -606,12 +800,24 @@
       return { _needs: 'navigate to https://www.amazon.com/dp/' + (asinFrom(location.href) || '<ASIN>') +
         '?aod=1 — the all-sellers panel renders client-side and is not on the plain product page' };
     }
-    return compact(rows.slice(0, 10).map((r) => compact({
-      price: money(pickText(S.oPrice, r)),
-      seller: clip(pickText(S.oSeller, r), 50),
-      shipsFrom: clip(pickText(S.oShip, r), 50),
-      condition: clip(pickText(S.oCondition, r), 40),
-    })));
+    // The heading slot holds a condition on most listings and the Subscribe & Save purchase mode
+    // on others, so route it through both validators rather than trusting whatever is in there.
+    // When it is neither, keep the raw text under `_heading` instead of dropping it: an
+    // unrecognised value is the signal that Amazon has put a third thing in that slot, and
+    // silently discarding it is precisely how this went unnoticed the first time.
+    return compact(rows.slice(0, 10).map((r) => {
+      const heading = pickText(S.oCondition, r);
+      const cond = condition(heading);
+      const mode = purchaseMode(heading);
+      return compact({
+        price: money(pickText(S.oPrice, r)),
+        seller: clip(pickText(S.oSeller, r), 50),
+        shipsFrom: clip(pickText(S.oShip, r), 50),
+        condition: clip(cond, 40),
+        purchaseMode: clip(mode, 40),
+        _heading: (heading && !cond && !mode) ? clip(heading, 40) : null,
+      });
+    }));
   }
 
   /* -------------------------------------------------------------- variants */
@@ -696,10 +902,30 @@
       available: opts.full ? available : undefined,
     }) || {};
 
+    // WHY THIS IS HEDGED NOW. Through v0.4.1 this asserted flatly that the rating "is not a
+    // rating for this variant alone", and it fired on every listing with more than one SKU
+    // regardless of evidence. That is overstated. Verified 2026-08-27: a 7-SKU listing served
+    // 4.3 / 662 ratings on one child and 4.4 / 531 on a sibling — different stars AND different
+    // counts, so Amazon was splitting that pool rather than stamping one number across seven
+    // SKUs. A warning that is always on and sometimes wrong is one the reader learns to skip,
+    // and that costs us the listings where the pooling is total and the number really is a lie.
+    //
+    // There is deliberately NO confidence score. Nothing on this page separates a pooled rating
+    // from a split one — the discriminator is a sibling's own rating.count, one navigation away.
+    // So state the mechanism, state the doubt, and hand over the exact URL that settles it,
+    // rather than inventing a number to stand in for the uncertainty.
     if (entries.length > 1) {
-      out._dilution = 'This listing\'s star rating is pooled across ' + entries.length + ' SKUs ('
-        + dims.map((dim, i) => axisSizes[i] + ' ' + dim).join(' x ')
-        + '). It is not a rating for this variant alone.';
+      const sibling = (available.find((c) => c.asin && c.asin !== here) || {}).asin;
+      out._dilution = 'Amazon pools one star rating across a listing, and this listing has '
+        + entries.length + ' SKUs (' + dims.map((dim, i) => axisSizes[i] + ' ' + dim).join(' x ')
+        + '). The rating shown may therefore have been earned mostly by a variant other than '
+        + 'this one. Some listings do serve per-SKU ratings, so treat this as a risk to check '
+        + 'rather than as an established fact.';
+      if (sibling) {
+        out._dilutionCheck = 'Compare rating.count here against ' + dpUrl(sibling)
+          + ' — the same count on both means one pooled rating; different counts mean Amazon is '
+          + 'splitting it, and the number on this page belongs to this variant.';
+      }
     }
     if (!selected && here) {
       out._warn = 'This page\'s ASIN (' + here + ') is not in dimensionToAsinMap. The key/index '
@@ -733,6 +959,8 @@
         if (v) out.variants = v;
       } else if (meta.type === 'search') {
         out.search = searchResults(opts);
+      } else if (meta.type === 'buyagain') {
+        out.buyAgain = buyAgain(opts);
       } else if (meta.type === 'reviews') {
         out.reviews = reviewsOn(document, opts);
       } else {
@@ -753,6 +981,7 @@
     const groups = t === 'product' ? { product: SEL.product }
       : t === 'search' ? { search: SEL.search }
       : t === 'reviews' ? { reviews: SEL.reviews }
+      : t === 'buyagain' ? { buyagain: SEL.buyagain }
       : { product: SEL.product, search: SEL.search };
     const report = { version: VERSION, pageType: t, url: location.href.split('?')[0],
                      ok: [], absent: [], broken: [] };
@@ -790,6 +1019,7 @@
     product: product,
     search: searchResults,
     reviews: reviewsOn,
+    buyAgain: buyAgain,
     offers: offers,
     variants: variants,
     full: full,
@@ -798,7 +1028,8 @@
     SEL: SEL,
     // Exposed for tests/parse.test.js, which runs this file under node with a stub window.
     // Not part of the caller-facing surface — do not build on it.
-    _internals: { clean, clip, money, num, currency, compact, asinFrom, txtOf, unitPrice },
+    _internals: { clean, clip, money, num, currency, compact, asinFrom, txtOf, unitPrice,
+                  couponInfo, condition, purchaseMode },
   };
   Object.defineProperty(window, '__amzx', { value: API, writable: true, configurable: true });
   }

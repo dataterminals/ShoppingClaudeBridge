@@ -28,7 +28,8 @@ if (!amzx) {
   console.error('FAIL: the script did not publish window.__amzx at all.');
   process.exit(1);
 }
-const { clean, clip, money, num, currency, compact, asinFrom, txtOf, unitPrice } = amzx._internals;
+const { clean, clip, money, num, currency, compact, asinFrom, txtOf, unitPrice,
+        couponInfo, condition, purchaseMode } = amzx._internals;
 
 let passed = 0;
 const failures = [];
@@ -133,13 +134,95 @@ const plain = { textContent: '  Anker  ', querySelector: () => null };
 eq('txtOf passes plain nodes through', txtOf(plain), 'Anker');
 eq('txtOf null element', txtOf(null), null);
 
+/* --------------------------------------------------------- couponInfo() ---
+ * The live string, captured 2026-08-27 on a grocery listing. It is 78 characters, so the old
+ * clip(…, 80) was NOT truncating it — the failure was never length. The failure is that the
+ * discount and the condition attached to it arrive as one run of prose, and a reader (or a
+ * comparison table) takes "30% off" as the price and drops "only if you start a subscription".
+ */
+const SNS = '30% off coupon applied. First Subscribe & Save orders only. Shop items | Terms';
+eq('coupon pct', couponInfo(SNS).pct, 30);
+eq('coupon is conditional', couponInfo(SNS).conditional, true);
+eq('coupon names the condition', couponInfo(SNS).requires, 'first-subscribe-and-save-order');
+eq('coupon already applied', couponInfo(SNS).applied, true);
+eq('coupon keeps the original text', couponInfo(SNS).text, SNS);
+eq('coupon reports no dollar amount when it is a percentage', couponInfo(SNS).amount, undefined);
+
+eq('coupon plain percentage is unconditional',
+   couponInfo('Save 5%'), { pct: 5, text: 'Save 5%' });
+eq('coupon dollar amount', couponInfo('Apply $5.00 coupon').amount, 5);
+eq('coupon not-yet-applied has no applied flag', couponInfo('Apply $5.00 coupon').applied, undefined);
+// A cap is not a saving. "up to $20" must never be reported as the discount — same shape of
+// error as reading a unit price as the price.
+eq('coupon ignores a dollar cap when a percentage is present',
+   couponInfo('Save 10% when you buy 2, up to $20'),
+   { pct: 10, conditional: true, requires: 'multi-buy', text: 'Save 10% when you buy 2, up to $20' });
+eq('coupon multi-buy detected', couponInfo('Save 15% when you purchase 3').requires, 'multi-buy');
+eq('coupon plain subscribe & save', couponInfo('Save 5% with Subscribe & Save').requires,
+   'subscribe-and-save');
+eq('coupon empty', couponInfo(''), null);
+eq('coupon null', couponInfo(null), null);
+
+/* ---------------------------------------------------------- condition() ---
+ * #aod-offer-heading is a heading slot, not a condition field. On a Subscribe & Save listing it
+ * served "One-time purchase" straight into `condition` (2026-08-27) — which is not a condition,
+ * reads exactly like one, and nothing flagged it.
+ */
+eq('condition new', condition('New'), 'New');
+eq('condition used grade', condition('Used - Very Good'), 'Used - Very Good');
+// Amazon Resale is a real seller and its offers carry this. An over-tight /^(new|used)/ would
+// have silently dropped a genuine offer, which is the expensive direction.
+eq('condition resale grade', condition('Resale - Like New'), 'Resale - Like New');
+eq('condition renewed', condition('Renewed'), 'Renewed');
+eq('condition open box', condition('Open Box - Like New'), 'Open Box - Like New');
+eq('condition REJECTS the purchase-mode toggle', condition('One-time purchase'), null);
+eq('condition REJECTS subscribe & save', condition('Subscribe & Save'), null);
+eq('condition rejects arbitrary prose', condition('Other Sellers on Amazon'), null);
+eq('condition empty', condition(''), null);
+
+eq('purchaseMode one-time', purchaseMode('One-time purchase'), 'One-time purchase');
+eq('purchaseMode hyphenless', purchaseMode('One time purchase'), 'One time purchase');
+eq('purchaseMode subscribe', purchaseMode('Subscribe & Save'), 'Subscribe & Save');
+eq('purchaseMode REJECTS a real condition', purchaseMode('New'), null);
+// The two validators must not both claim the same string, or the caller sees one value twice.
+for (const s of ['New', 'Used - Good', 'Resale - Like New', 'One-time purchase', 'Subscribe & Save']) {
+  eq(`"${s}" is claimed by exactly one validator`,
+     [condition(s), purchaseMode(s)].filter(Boolean).length, 1);
+}
+
+/* ------------------------------------------------- buyagain promo text ---
+ * Live promo strings from /gp/buyagain, 2026-08-27. All 18 promos on that page parsed to a
+ * percentage; these are the four distinct shapes. "reorder" is the one that caught an earlier
+ * `when you (buy|purchase|order)` out — "reorder" does not start at the `o`.
+ */
+eq('promo brand, unconditional',
+   couponInfo('Save 10% with brand promotion'), { pct: 10, text: 'Save 10% with brand promotion' });
+eq('promo reorder N qualifying items is multi-buy',
+   couponInfo('Save 10% when you reorder 5 qualifying items').requires, 'multi-buy');
+eq('promo subscribe & save', couponInfo('Coupon: Save 5% with Subscribe & Save').requires,
+   'subscribe-and-save');
+eq('promo select-option', couponInfo('Coupon available when you select this option').requires,
+   'select-option');
+// Every live promo on that page yielded a number. A promo that parses to no number at all is the
+// signal that the copy has changed shape, so pin the one that would regress first.
+eq('promo always yields a percentage when one is present',
+   couponInfo('Save 10%  when you reorder 5 qualifying items with brand promotion').pct, 10);
+
 /* ------------------------------------------------------- surface check --- */
-for (const fn of ['page', 'product', 'search', 'reviews', 'offers',
+for (const fn of ['page', 'product', 'search', 'reviews', 'offers', 'buyAgain',
                   'full', 'health', 'text']) {
   eq(`API exposes ${fn}()`, typeof amzx[fn], 'function');
 }
 eq('API reports a version', typeof amzx.version, 'string');
 eq('SEL registry is published for maintenance', typeof amzx.SEL.product.title, 'object');
+eq('SEL carries a buyagain group', Array.isArray(amzx.SEL.buyagain.row), true);
+// The anchor must stay specific. `[data-asin]` alone over-matched 392-to-24 on the live page, so
+// a change that relaxes the primary selector to a bare attribute is a regression, not a cleanup.
+eq('buyagain anchors on the un-hashed summary class, not a bare [data-asin]',
+   /almGridDesktopAsinInfoSummary/.test(amzx.SEL.buyagain.row[0]), true);
+// The fallback is the one that could reach the cart sidebar; it must carry the guard.
+eq('buyagain fallback excludes the cart sidebar',
+   /ewc/.test(amzx.SEL.buyagain.row[1]), true);
 
 /* --------------------------------------------------------------- report --- */
 if (failures.length) {

@@ -25,6 +25,21 @@ quietly doing something worse:
 
 So:
 
+**Pick the browser BEFORE the liveness probe.** With more than one Chrome connected,
+`tabs_context_mcp` hard-errors rather than guessing which one you meant — and the labels on offer
+("Browser 1 (Windows)", "Browser 2 (Windows)") do not say which machine is which, so the user
+cannot answer at a glance either. Hitting that mid-session costs a full round-trip before a single
+byte of Amazon has been read. Get it out of the way first:
+
+```
+mcp__claude-in-chrome__list_connected_browsers   # how many, and what they are called
+mcp__claude-in-chrome__select_browser            # commit to one
+```
+
+One browser connected: select it and carry on without asking. Two or more: ask once, quoting the
+labels you were given back to the user. This also settles Tier 1 vs Tier 2 before you spend
+anything discovering it, because the userscript is installed per-browser.
+
 **Probe liveness FIRST — before any `__amzx` check.** The first thing that can fail is
 `javascript_tool` itself, and when it does, every probe looks identical to "the library is
 missing". Make this the first JS call of the session:
@@ -125,6 +140,11 @@ don't keep retrying node IDs.
 
 Other useful URLs:
 
+- `https://www.amazon.com/gp/buyagain` — **start a reorder here.** `full()` returns every card with
+  price, unit price, promo and the Subscribe & Save vs one-time pills, so you get the whole
+  shopping list in one capture instead of navigating per item. `shown` is what is on the page:
+  Amazon paginates behind a "Load more" button and the library clicks nothing, so `hasMore: true`
+  means the list is longer than what you have. Don't click it — say so and work with what loaded.
 - `https://www.amazon.com/dp/<ASIN>` — canonical product page, no tracking cruft
 - `https://www.amazon.com/dp/<ASIN>?aod=1` — all sellers. The panel renders client-side, so you
   must **navigate** here; fetching it returns a page without the offers
@@ -201,6 +221,26 @@ Things worth flagging when you see them in a capture:
   is not a rating for the ring being bought, and nothing on the page says so. Real catches: a
   Claddagh listing whose colour axis held four Triquetra knots — a different ring entirely; a
   24-rating birthstone listing where every rating belonged to one colourway.
+
+  **`_dilution` is a risk flag, not a finding — report it as one.** It fires on every multi-SKU
+  listing, because nothing on the page distinguishes a pooled rating from a split one. Amazon
+  does sometimes split: on 2026-08-27 a 7-SKU listing served 4.3 / 662 on one child and
+  4.4 / 531 on a sibling. If the rating is load-bearing for the recommendation, spend the one
+  navigation `_dilutionCheck` names and compare `rating.count` — same count means genuinely
+  pooled, different counts mean the number in front of you is this variant's own. Otherwise say
+  "may be pooled across N SKUs", not "is not a rating for this variant".
+
+- **A coupon with a condition attached.** `coupon.conditional` marks the discounts that are not
+  really discounts. **Never quote `coupon.pct` without `coupon.requires`** — "30% off" that
+  applies only to a first Subscribe & Save order is a subscription decision wearing a price tag,
+  and it is the biggest number on the page, so a table that prints it bare is actively
+  misleading. `coupon.applied` says whether the saving is already inside `price.current`; if it
+  is, don't subtract it again.
+- **A cheaper offer sitting next to the price.** On Buy Again, `items[].offers` carries the
+  Subscribe & Save and one-time prices as separate pills. On a 24-card capture, **10 cards had a
+  subscription price below the number printed on the card**. Report both, and say which requires a
+  subscription — a lower price that commits the user to a recurring delivery is a decision.
+
 - **A variant that is advertised but not stocked.** `variants().unavailable` lists combinations the
   dropdown offers and the map doesn't have. Verified on `B015WD11L6`: "natural green peridot"
   exists in sizes 7 and 10 only — not in size 8, and the rendered dropdown never says so.
@@ -216,7 +256,31 @@ Things worth flagging when you see them in a capture:
 State what you observed and let the user judge. Don't refuse to report a product because it looks
 suspicious, and don't declare a listing fraudulent — describe the signal.
 
+## Comparing against non-Amazon retailers
+
+Sometimes the real question is whether the thing is cheaper somewhere else. That is outside this
+skill's tooling, and it runs into walls this repo does not control:
+
+- **Bot interstitials.** Cloudflare and similar challenge pages block `WebFetch` *and* a live
+  browser. Neither clears them.
+- **Fetch-hostile retailers.** Pages that 404 through `WebFetch` while rendering perfectly in a
+  browser. That is a blocked fetch, not a dead URL — don't report the product as unavailable.
+
+**Report the wall and stop.** Name the retailer, say what blocked you, hand the user the URL to
+open themselves. Do not retry the same fetch, do not cycle user agents or headers, and never work
+around a bot check or a CAPTCHA. This is the same rule that governs fetch-and-eval elsewhere in
+this repo: a refusal is a result, not an obstacle to be re-attempted in a different shape.
+
+A comparison you could not complete belongs in the report as a stated gap. Silence reads as "I
+checked and Amazon was cheapest", which is a different claim entirely.
+
 ## What this can't tell you
+
+**Prices for variants you are not looking at.** `variants()` gives you every SKU's ASIN, but not
+its price — the twister payload contains no prices at all (verified 2026-08-27: 218 KB, zero `$`
+amounts), because Amazon fetches the price when a variant is selected. Comparing flavours or sizes
+therefore costs **one navigation per variant**. Budget for that, or compare fewer. Do not promise a
+comparison you would need six round-trips to deliver without saying so first.
 
 **Price history.** Amazon does not show it and neither does this. If the user asks whether
 something is a good price, say plainly that you can compare it against current alternatives but

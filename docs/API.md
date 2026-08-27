@@ -79,6 +79,73 @@ anything else (`Best Seller`, `Amazon's Choice`) stays in `badge`.
 present. **`_missing`** lists any of `title / price / rating / availability / soldBy` that came
 back empty — always check it.
 
+#### `coupon` is parsed, not passed through
+
+Coupon text is prose with the largest number on the page inside it, and the qualifier that decides
+whether the number is real sits in the same sentence:
+
+```jsonc
+"coupon": {
+  "pct": 30,
+  "applied": true,
+  "conditional": true,
+  "requires": "first-subscribe-and-save-order",
+  "text": "30% off coupon applied. First Subscribe & Save orders only. Shop items | Terms"
+}
+```
+
+Real capture, 2026-08-27. **Read `conditional` before quoting `pct`.** A 30% coupon that only
+exists if you also start a subscription is a decision, not a discount, and a comparison table that
+prints "30% off" has told the user something false. `requires` is one of
+`first-subscribe-and-save-order`, `subscribe-and-save`, `multi-buy`, `minimum-spend`.
+
+`applied: true` means the discount is already inside `price.current` — subtracting it again
+double-counts. Its absence means the coupon still has to be clipped. `amount` replaces `pct` for
+flat-dollar coupons, and is deliberately **not** populated when a percentage is present: "10% off,
+up to $20" carries both numbers and the $20 is a cap, not a saving.
+
+### Buy Again — `/gp/buyagain`
+
+The page a recurring order starts from. Until v0.5.0 `page()` returned `type: "unknown"` here and
+there was no extractor at all.
+
+```jsonc
+{
+  "type": "buyagain",
+  "buyAgain": {
+    "shown": 24,
+    "hasMore": true,
+    "items": [
+      {
+        "asin": "B0EXAMPLE1",
+        "title": "…",
+        "price": 10.00,
+        "unit": "$9.90/fluid ounce",
+        "offers": [
+          { "mode": "One-time purchase", "price": 10.00 },
+          { "mode": "Subscribe & Save",  "price": 9.50 }
+        ],
+        "promo": { "pct": 10, "conditional": true, "requires": "multi-buy", "text": "Save 10% when you reorder 5 qualifying items…" },
+        "url": "https://www.amazon.com/dp/B0EXAMPLE1"
+      }
+    ]
+  }
+}
+```
+
+**`offers` is the reason to read this page through the extractor.** On a 24-card capture,
+**10 cards had a Subscribe & Save price below the headline price on the card** — the card shows
+one number and the cheaper one sits in a pill beside it. Same shape of finding as `offers()` on a
+product page.
+
+`was` is emitted only when it genuinely exceeds `price`. A card-wide `[data-a-strike="true"]`
+reported `was === price` on 8 of 13 rows, because strike markup outside the offer row re-renders
+the *current* price; the selector is scoped to the offer row and excludes the pills. The invariant
+check stays in the code as a tripwire and reports through `_warn` if it ever starts firing.
+
+`shown` is what is on the page, not what exists — Amazon paginates behind a **Load more** button
+and this library clicks nothing. `hasMore: true` means there are more.
+
 ### All sellers
 
 Navigate to `https://www.amazon.com/dp/<ASIN>?aod=1` and call `full()` again. The panel renders
@@ -98,6 +165,19 @@ is the reason this call exists.
 Call `offers()` on a page without the panel and you get `{_needs: "navigate to …"}` rather than
 an empty result, so a missing panel can't be mistaken for a product with one seller.
 
+**`condition` is validated against Amazon's own vocabulary, and is `null` when the heading slot
+holds something else.** `#aod-offer-heading` is a heading, not a condition field: on listings with
+a Subscribe & Save toggle it carries the purchase mode, and through v0.4.1 that landed in
+`condition` verbatim — a grocery listing reported `"condition": "One-time purchase"` on 2026-08-27,
+which is not a condition and reads exactly like one. Purchase mode now has its own field:
+
+```jsonc
+{ "price": 21.85, "seller": "Amazon.com", "purchaseMode": "One-time purchase" }
+```
+
+If the heading is neither, the raw text is kept as `_heading` rather than dropped — an
+unrecognised value there means Amazon has put a third thing in the slot, and that is worth seeing.
+
 ### Variants — `variants(opts?)`
 
 Included in `full()` on every product page. Decodes Amazon's twister payload
@@ -112,15 +192,31 @@ Included in `full()` on every product page. Decodes Amazon's twister payload
   "unavailable": [             // advertised in the dropdown, absent from the map
     { "ring_size": "8", "gem_type": "natural green peridot" }
   ],
-  "_dilution": "This listing's star rating is pooled across 45 SKUs (5 color_name x 9 ring_size). It is not a rating for this variant alone."
+  "_dilution": "Amazon pools one star rating across a listing, and this listing has 45 SKUs (5 color_name x 9 ring_size). The rating shown may therefore have been earned mostly by a variant other than this one. …",
+  "_dilutionCheck": "Compare rating.count here against https://www.amazon.com/dp/B0BV9YJ7XX — the same count on both means one pooled rating; different counts mean Amazon is splitting it, …"
 }
 ```
 
 `_dilution` is the payload. **A rating earned by one product and a rating pooled across ninety are
 different numbers wearing the same badge**, and nothing on the rendered page distinguishes them.
 
+**It is a risk flag, not a finding.** Before v0.5.0 this asserted the rating "is not a rating for
+this variant alone" on every multi-SKU listing, which is more than the page supports: verified
+2026-08-27, a 7-SKU listing served 4.3 / 662 on one child and 4.4 / 531 on a sibling — different
+stars *and* different counts, so Amazon was splitting that pool rather than pooling it. There is
+no confidence score, because nothing on the page distinguishes the two cases. `_dilutionCheck`
+names a sibling ASIN instead: navigate there, compare `rating.count`, and you have the answer for
+one navigation. Same count on both means genuinely pooled; different counts mean it is split and
+the number in front of you is this variant's own.
+
 `unavailable` is the other half: verified on `B015WD11L6`, "natural green peridot" is stocked in
 ring sizes 7 and 10 only — the dropdown offers it in size 8 and no such SKU exists.
+
+**There are no per-variant prices, and there is no way to add them.** Verified 2026-08-27: the
+twister blob holds zero `$` amounts and zero numeric price values across 218 KB. Every key in it
+matching `/price/i` is a *feature-div name* (`corePrice_feature_div`), because Amazon re-renders
+those slots over AJAX when a variant is selected — the price is fetched on selection. Comparing
+prices across variants costs one navigation each, and that is not an oversight in this library.
 
 Pass `{full: true}` for the complete decoded combination list (large; omitted by default). The
 decode is **self-validating**: map keys are underscore-joined value indices matching `dimensions`
