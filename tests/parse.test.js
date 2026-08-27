@@ -4,7 +4,7 @@
  *     node tests/parse.test.js
  *
  * These cover the pure string/number parsers, not the selectors. Selectors can only be
- * checked against the live site (see docs/API.md — `__amzx.health()`); everything here is
+ * checked against the live site (see docs/AMAZON-API.md — `__amzx.health()`); everything here is
  * DOM-free and therefore worth pinning, because every case below is a real defect that was
  * caught by running the extractor against amazon.com on 2026-08-20 rather than by reading it.
  *

@@ -1,17 +1,17 @@
 // ==UserScript==
-// @name         Amazon Claude Bridge
-// @namespace    https://github.com/dataterminals/AmazonClaudeBridge
+// @name         Shopping Claude Bridge — Amazon
+// @namespace    https://github.com/dataterminals/ShoppingClaudeBridge
 // @version      0.5.0
 // @description  Read-only extractor library for amazon.com. Exposes window.__amzx so an assistant driving the browser can pull a compact, de-sponsored JSON record of the current page instead of reading a 60 KB accessibility tree. Never clicks a buy control, submits a form, or reads credentials.
 // @author       dataterminals
-// @homepageURL  https://github.com/dataterminals/AmazonClaudeBridge
-// @supportURL   https://github.com/dataterminals/AmazonClaudeBridge/issues
+// @homepageURL  https://github.com/dataterminals/ShoppingClaudeBridge
+// @supportURL   https://github.com/dataterminals/ShoppingClaudeBridge/issues
 // @match        https://www.amazon.com/*
 // @run-at       document-idle
 // @grant        none
 // @license      MIT
-// @downloadURL  https://raw.githubusercontent.com/dataterminals/AmazonClaudeBridge/main/src/amazon-claude-bridge.user.js
-// @updateURL    https://raw.githubusercontent.com/dataterminals/AmazonClaudeBridge/main/src/amazon-claude-bridge.user.js
+// @downloadURL  https://raw.githubusercontent.com/dataterminals/ShoppingClaudeBridge/main/src/amazon-claude-bridge.user.js
+// @updateURL    https://raw.githubusercontent.com/dataterminals/ShoppingClaudeBridge/main/src/amazon-claude-bridge.user.js
 // @noframes
 // ==/UserScript==
 //

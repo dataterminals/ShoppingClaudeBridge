@@ -1,0 +1,218 @@
+# `window.__ebayx` — eBay API
+
+Every call is synchronous except `full()`.
+
+Published by `src/ebay-claude-bridge.user.js` on `www.ebay.com`. Read-only: it makes no network
+requests and clicks nothing. See [AMAZON-API.md](AMAZON-API.md) for the other half — the two
+records are deliberately different shapes, and comparing them field-for-field is a mistake.
+
+```js
+await __ebayx.full()               // item / search — dispatches on page type
+await __ebayx.full({limit: 40})    // search page, more rows (default 24)
+__ebayx.health()                   // selectors, plus whether the variant payload still parses
+```
+
+Every record is pruned of nulls and empty branches, and long strings are capped.
+
+---
+
+## `full(opts?)` → Promise\<object\>
+
+Common envelope on every page:
+
+```json
+{
+  "type": "item",
+  "url": "https://www.ebay.com/itm/225056546791",
+  "itemId": "225056546791",
+  "title": "…",
+  "capturedAt": "2026-08-27T…Z",
+  "_v": "0.1.0"
+}
+```
+
+If the page is interposed, `blocked` is set and `error` says what to do:
+
+| `blocked` | Meaning |
+|---|---|
+| `challenge` | `/splashui/challenge`, "Pardon Our Interruption" |
+| `transient-error` | "Something went wrong on our end", with a trace id |
+
+Both clear the same way: **one ~5s wait, one re-navigation of the identical URL, then stop.**
+Never interact with the challenge, and never loop.
+
+---
+
+### On a search page
+
+```json
+{
+  "search": {
+    "shown": 24,
+    "scanned": 70,
+    "rows": [
+      {
+        "itemId": "168604533032",
+        "url": "https://www.ebay.com/itm/168604533032",
+        "title": "Vans Sk8-Hi …",
+        "condition": "Pre-Owned",
+        "sizeHint": "US W 9",
+        "aspects": ["US W 9", "VANS"],
+        "price": 9.95,
+        "currency": "USD",
+        "shipping": { "text": "+$5.80 delivery", "cost": 5.8 },
+        "total": 15.75,
+        "saleFormat": "bin",
+        "watchers": 10
+      }
+    ],
+    "_warn": "Sponsored placements are NOT filtered out of these rows …"
+  }
+}
+```
+
+**`total` is the sort key, not `price`.** On a live 60-row search, 57 of 60 positions changed
+between the two orderings.
+
+**`sizeHint` is a hint.** It is the listing's own aspect and is *not* stock-checked — a card
+advertising `US W 9` belonged to a listing whose variant map marks that size out of stock. Only
+`variants()` on the item page knows.
+
+**`_warn` about ads is always present and must be carried through.** `__ebayx` does not attempt
+sponsored detection: across a 70-card search the only candidate signal matched 70 of 70 cards,
+while forward `Sponsored` text and every class/aria candidate matched 0. Promo cards are dropped
+by requiring an `itemId`, not by ad detection.
+
+**`_auctionWarn`** appears when any row is an auction. `price` on those rows is the current bid
+and will rise; `saleFormat` is `auction`, `bin`, or `auction+bin`.
+
+Shipping has three distinguishable states:
+
+| Output | Meaning |
+|---|---|
+| `{free: true, cost: 0}` | genuinely free |
+| `{cost: 5.83}` | a parsed surcharge |
+| `cost` absent | **did not parse.** `total` is absent too, deliberately — never treat unknown as zero |
+
+---
+
+### On an item page
+
+```json
+{
+  "item": {
+    "itemId": "225056546791",
+    "title": "*NEW* Unisex VANS SK8-HI BLACK / BLACK / WHITE (VN000D5IB8C)",
+    "condition": "New with box",
+    "price": 51.9,
+    "currency": "USD",
+    "discount": { "was": 55.21, "pct": 6, "text": "Was US $55.21 (6% off)" },
+    "shipping": { "free": true, "cost": 0, "from": "Wheeling, Illinois, United States" },
+    "total": 51.9,
+    "returns": { "accepted": true, "days": 30, "shippingPaidBy": "buyer" },
+    "seller": { "name": "…", "feedbackCount": 31571, "positivePct": 99.9 },
+    "quantity": { "available": 2, "sold": 236 },
+    "specifics": { "Brand": "VANS", "Model": "VN000D5IB8C", "…": "…" },
+    "styleCode": "VN000D5IB8C"
+  }
+}
+```
+
+`_missing` lists which of `title`, `price`, `condition`, `seller` came back empty.
+
+**`returns` is a tri-state**, and on anything that might not fit it is the highest-signal field on
+the page:
+
+| Page text | Parsed |
+|---|---|
+| `30 days returns. Seller pays for return shipping.` | `{accepted: true, days: 30, shippingPaidBy: "seller"}` |
+| `30 days returns. Buyer pays for return shipping.` | `{accepted: true, days: 30, shippingPaidBy: "buyer"}` |
+| `Seller does not accept returns.` | `{accepted: false}` |
+
+**Never print `positivePct` without `feedbackCount`.** 100% across 32 sales and 99.7% across
+10,025 are different objects, and the card shows the less informative one.
+
+**`specifics` beats the title where they disagree.** One listing titled *"Men's 8 / Women's 9"*
+carried `US 8 / UK 7 / EU 40.5` in its own specifics, and Vans men's 8 is women's 9.5 — the seller
+converted by hand and got it wrong by half a size. `styleCode` (from `Model` / `MPN`) is the only
+reliable colorway identifier on a platform where one shoe is listed as "Burnt Ochre", "Tan" and
+"Brown" by three different sellers.
+
+---
+
+## `variants(opts?)` → object | null
+
+The most valuable call in the library, and it needs **no click and no request** — everything comes
+from a static `<script>` at document-idle, anchored at `"MSKU":{"_type":"VariationViewModel"`.
+
+```json
+{
+  "axes": [
+    {
+      "axis": "US Shoe Size",
+      "availableCount": 8,
+      "totalCount": 16,
+      "options": [
+        { "value": "7.0 US Men / 8.5 US Women", "available": true,
+          "qtyAvailable": 3, "sold": 236, "price": 51.9 },
+        { "value": "7.5 US Men / 9.0 US Women", "available": false, "sold": 236, "price": 51.9 }
+      ]
+    }
+  ],
+  "variationCount": 16,
+  "price": { "min": 51.9, "max": 51.9, "distinct": 1 }
+}
+```
+
+Returns `null` on a single-SKU listing — `full()` then sets `variantsNote` saying so, and
+`health()` distinguishes "no variants here" from "the anchor moved".
+
+**Unlike Amazon, eBay ships per-variant prices.** `price.{min,max,distinct}` is computed across
+the whole listing. `_warn` fires when `min !== max`.
+
+Three traps, all handled, documented so the output shape makes sense:
+
+- **The option key space is flat and global across axes.** A 4-axis listing puts all 29 options in
+  one map, each axis owning a disjoint slice. `axes` is built by grouping through `selectMenus`;
+  anything iterating the raw map gets sizes, colours and pack counts jumbled together.
+- **An option can span many SKUs.** Single-axis listings pin one; a 4-axis one ran to 137. So on a
+  multi-axis listing each option reports `priceFrom` / `priceTo` and `skus` instead of `price`,
+  omits quantity, and `_multiAxis` explains why.
+- **`enabled` is selection state, not availability.** Every option is `enabled: false` on a freshly
+  loaded page. `available` comes from `outOfStock`.
+
+eBay's own `showMskuPriceRange` flag is **not** a variance signal — it was `false` on a listing
+spanning $12.90 to $49.90 across 7 distinct prices.
+
+---
+
+## `health()` → object
+
+Which selectors resolve on the current page, split into `ok` / `absent` / `broken`. `absent`
+covers fields legitimately missing on healthy pages (no discount, no delivery row), so a real
+break is not buried in expected noise.
+
+On item pages it additionally reports `item.mskuModel` with the axis and variation counts, because
+the variant payload is not a selector and the loop cannot otherwise see it.
+
+## Narrower calls
+
+| Call | Returns |
+|---|---|
+| `page()` | the envelope only — type, url, itemId, blocked |
+| `item()` | the item record |
+| `search(opts?)` | the search record |
+| `specifics()` | the item-specifics map alone |
+| `seller()` | the seller object alone |
+| `text(max?)` | rough visible text, for page types with no extractor |
+
+## Failure modes worth knowing
+
+- **`li.s-item` is dead.** Every scraping guide online still uses it; it matched 0 nodes against 70
+  for `.su-card-container`. It survives only as the last fallback candidate.
+- **`[role="option"]` nodes look usable and are not.** They carry the label and a
+  `data-sku-value-name`, but no stock state — `/out of stock/i` matches nowhere in the page text on
+  a listing with five dead sizes. Availability comes from the variant payload only.
+- **The MSKU anchor is a single point of failure** for the best data on the site. It is a typed
+  model name rather than a content-hashed CSS class, so it should outlast the selectors around it —
+  but if it moves, `variants()` returns `null` and `health()` says which case you are in.

@@ -1,6 +1,7 @@
-# `window.__amzx` — API
+# `window.__amzx` — Amazon API
 
-Every call is synchronous except `full()`, `offers()` and `criticalReviews()`.
+Every call is synchronous except `full()`. (`criticalReviews()` was removed in v0.2.0 and
+`offers()` has been synchronous since the fetch path went with it.)
 All output is pruned: nulls, empty objects and empty arrays are dropped before returning.
 
 ## `full(opts?)` → Promise\<object\>

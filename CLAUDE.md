@@ -1,33 +1,60 @@
-# CLAUDE.md — AmazonClaudeBridge
+# CLAUDE.md — ShoppingClaudeBridge
 
 Repo-specific rules. General conventions come from the sibling TFW/dataterminals repos.
 
 ## What this repo is
 
-A userscript that publishes `window.__amzx` on `www.amazon.com` — a read-only extractor library.
+**Two** userscripts, one per marketplace, each publishing a read-only extractor library:
+
+| Source | Publishes | On |
+|---|---|---|
+| `src/amazon-claude-bridge.user.js` | `window.__amzx` | `www.amazon.com` |
+| `src/ebay-claude-bridge.user.js` | `window.__ebayx` | `www.ebay.com` |
+
 **You are the caller.** The user pastes a product link, you navigate their Chrome there and
-evaluate `__amzx.full()`. They should never have to press a key on the page.
+evaluate `full()`. They should never have to press a key on the page.
+
+They are separate scripts on purpose. `@match` already guarantees the two can never be live on
+the same page, so merging them would only double what Tier 2 costs on every injection — the
+Amazon half would carry eBay's selectors into every amazon.com page and vice versa. The ~110-line
+util block is duplicated across the two instead, held byte-identical by `tests/core-parity.test.js`
+(see rule 8).
 
 Cosmetics (dark mode) live in the sibling repo **AmazonTweaks**. Do not add UI here, and do not
 add extraction there.
+
+### The two records are deliberately different shapes
+
+Amazon is a catalogue; eBay is a market. On Amazon, condition, seller and postage are mostly
+constant, so `price` is decision-grade alone. On eBay all three are seller-set variables and
+`price` without `shipping` is simply **wrong** — on a live 60-row search, 57 of 60 positions
+changed when sorted by `total` instead of `price`. Do not "harmonise" the two record shapes; an
+eBay record that looks like an Amazon one is actively misleading.
 
 ## How to use it in a session
 
 ```js
 // after navigating the tab to an amazon.com URL
-await __amzx.full()                 // search page or product page — dispatches on page type
+await __amzx.full()                 // search / product / reviews / buyagain — dispatches on page type
 await __amzx.full({limit: 40})      // search page, more rows (default 24)
 __amzx.health()                     // which selectors still resolve here
+
+// after navigating to an ebay.com URL
+await __ebayx.full()                // item / search
+__ebayx.health()                    // selectors, plus whether the variant map still parses
 ```
 
 **Extra data costs a navigation, not an option flag.** There is no fetch path (see rule 7):
 
 ```js
-// all sellers — the buy box shows one and it is often not the cheapest
+// Amazon — all sellers; the buy box shows one and it is often not the cheapest
 navigate(`https://www.amazon.com/dp/${asin}?aod=1`); await __amzx.full()   // -> .offers
-// reviews
+// Amazon — reviews
 navigate(`https://www.amazon.com/product-reviews/${asin}/`); await __amzx.full()
 ```
+
+eBay needs no equivalent for variants: every option, its stock state, its price and its remaining
+quantity are in a static `<script>` on the item page. See rule 9.
 
 `full()` is async. Return it directly — the eval has REPL semantics and top-level `await` works.
 
@@ -62,10 +89,16 @@ broken selector than a genuinely sparse product.
    not verification.
 
 6. **Run the suites after any change.** All zero-dependency, plain node:
-   `node tests/parse.test.js` (parsers), `node tests/orders.test.js` (order ingest),
-   `node tests/vendor.test.js` + `node bin/vendor.js --check` (the injected asset matches source),
+   `node tests/parse.test.js` (Amazon parsers), `node tests/ebay-parse.test.js` (eBay parsers),
+   `node tests/orders.test.js` (order ingest),
+   `node tests/core-parity.test.js` (the shared util block is identical in both userscripts),
+   `node tests/vendor.test.js` + `node bin/vendor.js --check` (both injected assets match source),
    `node tests/package.test.js` (the bundle writer),
-   `node bin/skill-drift.js --check` (the two skills are in step).
+   `node bin/skill-drift.js --check` (the two skill trees are in step).
+
+   ```bash
+   for t in parse ebay-parse orders core-parity vendor package; do node tests/$t.test.js; done
+   ```
 
 7. **Do not re-add a fetch path — of either kind.** Sub-page fetching was removed in v0.2.0: the
    all-offers AJAX endpoints 404 in every URL shape, and `?aod=1` over XHR omits the
@@ -89,12 +122,65 @@ broken selector than a genuinely sparse product.
    endpoint, check the returned stars actually match the filter before believing it — the old code
    "worked" in the sense that it returned reviews.
 
+   **And a third kind: never `WebFetch` an eBay URL.** A WebFetch of an eBay search for Vans
+   hi-tops returned a clean, well-formed markdown table of **Bobby Witt Jr. baseball cards** —
+   plausible titles, plausible prices, plausible seller handles, entirely unrelated to the query.
+   That is worse than an error, because it has the shape of a success and would sail straight into
+   a comparison table with nothing announcing it was wrong. Browser only. Nobody has tested
+   whether Amazon does the same thing, so do not assume it is safe there either.
+
+8. **The shared util block is duplicated, and that is the design.** Both userscripts carry the
+   same ~110 lines between `// --8<-- shared core: START/END` markers. A userscript is one file
+   the extension injects, so they cannot share a module, and a build step producing them would
+   turn `src/*.user.js` into generated files — which is exactly where `@downloadURL` and
+   `@updateURL` point, so the generated artifacts would have to stay committed at those paths
+   anyway. Duplication plus detection is the cheaper trade, and it is the same doctrine as
+   `vendor.js --check` and `skill-drift.js`: **the copy is allowed, the drift is not.**
+
+   `tests/core-parity.test.js` holds them byte-identical and also evaluates both scripts, because
+   identical text can still behave differently if a later line shadows a util. **Fixing a failure
+   there means porting the change to every userscript — never deleting the block from one.** The
+   markers are `//` on purpose: `vendor.js` strips whole-line comments, so adding or moving them
+   leaves the vendored assets byte-identical and no gate needs re-baselining.
+
+9. **eBay's variant map is static — do not add a click to reach it.** The eBay scope notes
+   proposed a click-then-read for the size dropdown, on the evidence that `.x-msku select` yields
+   0 options and `[role="option"]` looked empty. Both observations are real and the conclusion was
+   wrong. Verified 2026-08-27 on item `225056546791`: the entire map — every option, its
+   `outOfStock` state, its price, its remaining quantity — is in a static `<script>` at
+   document-idle, anchored at `"MSKU":{"_type":"VariationViewModel"`, and `outOfStockLabel`
+   ("(Out of stock)") is in the same object. The click only makes eBay *render* a label it already
+   has. Read-only (rule 4) therefore stands unamended, and re-introducing a click would mean a
+   document-wide button sweep on pages carrying *Buy It Now*, *Place bid* and *Make offer*.
+
+   Three traps in that payload, each producing confident nonsense rather than an error:
+
+   - **The key space is flat and global across axes.** A 4-axis listing puts all 29 options in one
+     `menuItemMap`, each axis owning a disjoint slice. Iterating it directly yields sizes, colours
+     and pack counts jumbled together. Group through `selectMenus`.
+   - **`matchingVariationIds[0]` is only safe on single-axis listings.** On the 4-axis one the
+     lengths ran 137, 56, 29, 30, 94, 44, 55, 8, 8, 8. Taking `[0]` reports an arbitrary SKU's
+     price as the option's.
+   - **`enabled` is selection state, not availability.** Every entry is `enabled: false` on a
+     freshly loaded page. `outOfStock` is the field.
+
+   Also: `showMskuPriceRange` is **not** a price-variance signal — it was `false` on a listing
+   spanning $12.90 to $49.90 across 7 distinct prices. It is a display preference. Compute
+   variance from `variationsMap`.
+
+   Unlike Amazon's twister, eBay **does** ship per-variant prices
+   (`variationsMap[id].binModel.price.value.value`). Do not carry an assumption in either
+   direction between the two sites.
+
 ## There are TWO skill files and they are meant to differ
 
 | | Where | What it is |
 |---|---|---|
-| Repo skill | `.claude/skills/amazon-shopping/SKILL.md` | **Public and generic.** Source of truth for logic, findings and guidance |
-| Plugin skill | `plugin/skills/amazon-shopping/SKILL.md` | **Personal.** The operator's own build, distributed through their account's plugin store |
+| Repo skill | `.claude/skills/shopping-research/` | **Public and generic.** Source of truth for logic, findings and guidance |
+| Plugin skill | `plugin/skills/shopping-research/` | **Personal.** The operator's own build, distributed through their account's plugin store |
+
+Each is a tree, not a file: `SKILL.md` routes and holds the shared discipline, and the
+site-specific detail lives in `references/amazon.md` and `references/ebay.md`.
 
 The plugin variant names the operator's machines, addresses them directly, bundles `bin/orders.js`,
 and routes purchase history through its own `references/` rather than a repo checkout. **This
@@ -112,15 +198,20 @@ node bin/skill-drift.js --accept   # re-baseline once you have ported it
 ```
 
 Baseline lives in `skill-sync.json` and stores **hashes only** — never the plugin's content.
+`skill-drift.js` hashes **every `*.md` in the tree**, not just `SKILL.md`. That distinction did
+not exist when the skill was one flat file, and it matters now: a corrected selector or an
+"this parameter is inert" note lands in a *reference*, and a SKILL.md-only check would call that
+"in step" while the plugin kept serving the old text. Assets are excluded — `vendor.js --check`
+already gates those byte for byte.
 
 The plugin tree is versioned in a **private** sibling repo,
-`dataterminals/AmazonClaudeBridge-plugin`, cloned into `plugin/` here. That repo pins
+`dataterminals/ShoppingClaudeBridge-plugin`, cloned into `plugin/` here. That repo pins
 `eol=lf`: with a global `autocrlf=true`, a clone on a second machine would otherwise rewrite
 `amzx.min.js` to CRLF, change its hash, and break both the byte-identical property and the
 baseline above. To set up a second machine:
 
 ```bash
-git clone git@github.com:dataterminals/AmazonClaudeBridge-plugin.git plugin
+git clone git@github.com:dataterminals/ShoppingClaudeBridge-plugin.git plugin
 node bin/skill-drift.js --check
 ```
 On a machine whose git talks to GitHub over HTTPS, that SSH URL fails with `Host key verification
@@ -128,7 +219,7 @@ failed` before it ever reaches auth. Use the `gh` credential path instead — sa
 to place:
 
 ```bash
-gh repo clone dataterminals/AmazonClaudeBridge-plugin plugin
+gh repo clone dataterminals/ShoppingClaudeBridge-plugin plugin
 ```
 Porting is deliberately manual, because unlike `bin/vendor.js` there is no mechanical transform
 between the two: a human decides which changes are generic and which are personal.
@@ -151,7 +242,7 @@ Output is deterministic (fixed 1980 timestamps), so `sha256` of a bundle answers
 build I already handed over?". **Do not substitute `Compress-Archive` or
 `ZipFile.CreateFromDirectory`**: both write backslash entry names, which is off-spec — the archive
 looks correct in Explorer and arrives at a strict extractor as one file called
-`skills\amazon-shopping\SKILL.md`. That is why the container is written by hand.
+`skills\shopping-research\SKILL.md`. That is why the container is written by hand.
 
 ## Order history
 
@@ -171,6 +262,8 @@ Three rules:
   add them back; nothing this tool answers needs them.
 
 ## Known-fragile spots
+
+### Amazon
 
 - **Sponsored detection** currently rests on `.puis-sponsored-label-text` /
   `.puis-label-popover-default`. The latter is a generic popover class kept as a last-resort
@@ -215,3 +308,38 @@ Three rules:
   On 2026-08-23, 7 of the 10 rows carrying a `was` reported it *below* their own price. Fixed in
   v0.4.1 by narrowing the fallback to a `>` chain that cannot enter that wrapper. The invariant
   worth remembering is cheap to check and was never checked: **`was` must exceed `price`.**
+
+### eBay
+
+- **Sponsored detection is unsolved, and `__ebayx` deliberately does not attempt it.** Probed
+  2026-08-27 across a 70-card search: the reversed literal `derosnopS` matched **70 of 70** cards,
+  forward `/Sponsored/i` matched **0**, and `[class*=sponsored]` / `[aria-label*=Sponsored]`
+  matched **0**. The only available signal would flag the entire page as advertising. On the
+  Amazon side a false positive hides one real product; here it would hide all of them. So
+  `search()` ships a `_warn` saying ads are not filtered, and the skill must never claim they
+  were. Promo cards are dropped by **requiring an item id**, not by ad detection. If someone
+  finds a real marker, that `_warn` is what has to change.
+- **`li.s-item` is dead.** It is what every eBay scraping guide on the internet still uses and it
+  matched **0** nodes on 2026-08-27, against 70 for `.su-card-container` / `.s-card`. It is kept
+  as the last fallback in `SEL.search.results` only so an old layout would still resolve. Do not
+  reorder it upward.
+- **The item-specifics container is `module-evo`, not `section-evo`.** The scope notes concluded
+  there was "no working structured selector" after trying `.ux-layout-section--features` and
+  `.ux-layout-section-evo__row`. Both are real classes and both are wrong here: the first also
+  matches the *condition* section, and the second matches nothing because that section has no
+  rows at all. The right anchor is `.ux-layout-section-module-evo__container` filtered by its
+  heading, then `.ux-layout-section-evo__col` → `…__labels-content` / `…__values-content`.
+  Verified: exactly 1 container, 16 clean pairs.
+- **`[role="option"]` nodes are populated but carry no stock state.** The notes reported them as
+  empty; they are not — they hold the label and a `data-sku-value-name`. What they do *not* hold
+  is availability: `/out of stock/i` matches nowhere in `document.body.innerText` on a listing
+  with five dead sizes. Reading them gives you clean-looking labels stripped of the one fact that
+  matters, which is the search-card lie one level down. **Availability comes from `menuItemMap`
+  only.**
+- **Auctions are a different unit.** `.s-card__price` on an auction row is the *current bid* and
+  will rise; a row can carry both a bid and a Buy It Now price. `saleFormat` and `_auctionWarn`
+  exist so a comparison table does not silently rank a bid against a purchase price.
+- **The MSKU anchor is the single point of failure for the best data on the site.** It is a typed
+  model name (`"MSKU":{"_type":"VariationViewModel"`), which is far more durable than eBay's
+  content-hashed CSS classes — but if it moves, `variants()` returns null and `full()` says so via
+  `variantsNote`. `health()` reports it separately from the selectors for that reason.

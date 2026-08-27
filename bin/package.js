@@ -42,8 +42,14 @@ const { execFileSync } = require('child_process');
 const ROOT = path.join(__dirname, '..');
 const PLUGIN_DIR = path.join(ROOT, 'plugin');
 const MANIFEST = path.join(PLUGIN_DIR, '.claude-plugin', 'plugin.json');
-const REPO_ASSET = path.join(ROOT, '.claude', 'skills', 'amazon-shopping', 'assets', 'amzx.min.js');
-const PLUGIN_ASSET = path.join(PLUGIN_DIR, 'skills', 'amazon-shopping', 'assets', 'amzx.min.js');
+// Every vendored asset has a hand-maintained twin inside plugin/. Derive the pairs from vendor.js
+// rather than restating paths here: adding a site should not silently leave its library ungated.
+const { TARGETS } = require('./vendor.js');
+const ASSET_PAIRS = TARGETS.map((t) => ({
+  name: t.name,
+  repo: t.out,
+  plugin: path.join(PLUGIN_DIR, path.relative(path.join(ROOT, '.claude'), t.out)),
+}));
 
 // Repo plumbing that has no business inside a distributed bundle. `*.plugin` is here because the
 // archive is written to the repo root, and a second run would otherwise pack the first one.
@@ -134,7 +140,7 @@ function preflight() {
   if (!manifest.name) problems.push(rel(MANIFEST) + ' has no "name" — it names the bundle');
   if (!manifest.version) problems.push(rel(MANIFEST) + ' has no "version" — installs replace by version');
 
-  for (const [label, args] of [['vendored asset', ['bin/vendor.js', '--check']], ['skills', ['bin/skill-drift.js', '--check']]]) {
+  for (const [label, args] of [['vendored assets', ['bin/vendor.js', '--check']], ['skills', ['bin/skill-drift.js', '--check']]]) {
     try {
       execFileSync(process.execPath, args, { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'] });
     } catch (e) {
@@ -143,13 +149,20 @@ function preflight() {
     }
   }
 
-  // The gate this file exists for: vendor.js cannot see plugin/, so this copy is the one that
-  // goes stale, and a stale copy is invisible — Tier 2 just quietly injects last month's library.
-  if (!fs.existsSync(PLUGIN_ASSET)) {
-    problems.push('no ' + rel(PLUGIN_ASSET) + ' — the bundle has no library to inject');
-  } else if (sha256(fs.readFileSync(PLUGIN_ASSET)) !== sha256(fs.readFileSync(REPO_ASSET))) {
-    problems.push('bundled asset differs from the vendored one. It is a mechanical copy:\n'
-      + '    cp ' + rel(REPO_ASSET) + ' ' + rel(PLUGIN_ASSET));
+  // The gate this file exists for: vendor.js cannot see plugin/, so these copies are the ones
+  // that go stale, and a stale copy is invisible — Tier 2 just quietly injects last month's
+  // library. Checked per site: shipping one current library and one stale one is worse than
+  // shipping two stale ones, because the report mixes them without saying so.
+  for (const pair of ASSET_PAIRS) {
+    if (!fs.existsSync(pair.repo)) {
+      problems.push('no ' + rel(pair.repo) + ' — run: node bin/vendor.js');
+    } else if (!fs.existsSync(pair.plugin)) {
+      problems.push('no ' + rel(pair.plugin) + ' — the bundle has no ' + pair.name
+        + ' library to inject:\n    cp ' + rel(pair.repo) + ' ' + rel(pair.plugin));
+    } else if (sha256(fs.readFileSync(pair.plugin)) !== sha256(fs.readFileSync(pair.repo))) {
+      problems.push('bundled ' + pair.name + ' differs from the vendored one. It is a mechanical '
+        + 'copy:\n    cp ' + rel(pair.repo) + ' ' + rel(pair.plugin));
+    }
   }
 
   return problems;
@@ -192,7 +205,10 @@ function main() {
 
   console.log('wrote ' + out);
   console.log('  ' + manifest.name + ' ' + manifest.version + ' — ' + entries.length + ' files, ' + kb(zip.length));
-  console.log('  library ' + sha256(fs.readFileSync(PLUGIN_ASSET)).slice(0, 16) + ' (matches ' + rel(REPO_ASSET) + ')');
+  for (const pair of ASSET_PAIRS) {
+    console.log('  ' + pair.name.padEnd(6) + sha256(fs.readFileSync(pair.plugin)).slice(0, 16)
+      + ' (matches ' + rel(pair.repo) + ')');
+  }
   console.log('  sha256 ' + sha256(zip).slice(0, 16) + ' — deterministic; an identical tree rebuilds to this exactly.');
   console.log('  personal build: it names real machines. Hand it to Cowork, never to a public repo.');
 }
