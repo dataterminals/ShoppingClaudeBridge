@@ -172,6 +172,26 @@ broken selector than a genuinely sparse product.
    (`variationsMap[id].binModel.price.value.value`). Do not carry an assumption in either
    direction between the two sites.
 
+10. **Row collectors use `pickAll()`, never `cands.join(',')`.** A joined selector unions every
+    candidate. When candidates are nested wrappers around the same row — and on eBay
+    `.su-card-container` sits inside `.s-card` — the union returns each row once per matching
+    candidate. Live on 2026-08-27: 140 nodes for 70 cards, duplicates at adjacent indices, and a
+    `full({limit: 600})` that reported 496 rows for 243 distinct items. `pickAll` takes the first
+    candidate that matches anything, which is what `pick`/`pickText` have always done for single
+    elements. The Amazon side had a hand-rolled version of the same idea and now uses the helper.
+
+    Row collectors should also **scope to the results container** (`#srp-river-results` on eBay)
+    and **de-duplicate by id**: the same listing legitimately renders twice when it is in both the
+    carousel and the river.
+
+11. **`full()` must lift `_missing` and `_warn` onto the envelope.** Through eBay 0.1.0 they lived
+    only where they were produced — `item()._missing` at `out.item._missing`, with `out._missing`
+    undefined. The skill's own loop says "check `_missing` and `_warn` on every result", and
+    following that instruction returned a clean bill of health on a holed record. That is the
+    failure that *hides* the other failures, which is why it outranks the holes themselves. Fixed
+    at the envelope in `hoist()` rather than by asking readers to remember nested keys; the nested
+    copies stay put, so it is an index, not a move.
+
 ## There are TWO skill files and they are meant to differ
 
 | | Where | What it is |
@@ -339,6 +359,17 @@ Three rules:
 - **Auctions are a different unit.** `.s-card__price` on an auction row is the *current bid* and
   will rise; a row can carry both a bid and a Buy It Now price. `saleFormat` and `_auctionWarn`
   exist so a comparison table does not silently rank a bid against a purchase price.
+- **`condition` has no element of its own on a large class of listings.** On a pre-owned listing,
+  `[data-testid="x-item-condition"]`, `.x-item-condition-value` and *every* class or testid
+  matching `/condition/i` are absent — the field is simply not rendered as a component there. The
+  value survives in the item-specifics form with eBay's boilerplate essay appended, so
+  `conditionValue()` falls back to it and `conditionGrade()` keeps the part before the first colon.
+  `health()` reports which path won, because "no slot" and "no value" are different answers.
+  This matters more than it looks: condition is the field eBay sellers are loosest with, and a
+  blank that reads as fine is worse than one that reads as absent.
+- **`quantity` absent is normal, not broken.** A single-item listing renders no quantity widget and
+  carries no "N available" / "N sold" text at all. It is in `OPTIONAL` for that reason — reporting
+  it BROKEN is the cry-wolf failure that makes `health()` worth ignoring.
 - **The MSKU anchor is the single point of failure for the best data on the site.** It is a typed
   model name (`"MSKU":{"_type":"VariationViewModel"`), which is far more durable than eBay's
   content-hashed CSS classes — but if it moves, `variants()` returns null and `full()` says so via

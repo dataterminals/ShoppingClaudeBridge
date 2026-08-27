@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopping Claude Bridge — eBay
 // @namespace    https://github.com/dataterminals/ShoppingClaudeBridge
-// @version      0.1.0
+// @version      0.2.0
 // @description  Read-only extractor library for ebay.com. Exposes window.__ebayx so an assistant driving the browser can pull a compact JSON record of the current page instead of reading a 60 KB accessibility tree. Never clicks a control, submits a form, or reads credentials.
 // @author       dataterminals
 // @homepageURL  https://github.com/dataterminals/ShoppingClaudeBridge
@@ -52,7 +52,7 @@
 (function () {
   function __ebayxLib() {
   'use strict';
-  const VERSION = '0.1.0';
+  const VERSION = '0.2.0';
 
   // --8<-- shared core: START. Byte-identical across every *.user.js in src/.
   // Verify with `node tests/core-parity.test.js`. These markers are `//` on purpose:
@@ -75,6 +75,17 @@
   const pick = (cands, root = document) => {
     for (const c of cands) { const el = $(c, root); if (el) return el; }
     return null;
+  };
+
+  // All elements for the FIRST candidate that matches anything — NOT the union of every
+  // candidate. `$$(cands.join(','))` looks equivalent and is not: when candidates are nested
+  // wrappers around the same row, the union returns each row once per matching candidate.
+  // Verified 2026-08-27 on an eBay search: every .su-card-container sits inside an .s-card,
+  // so the joined form returned 140 nodes for 70 cards and every result arrived twice, in
+  // adjacent pairs. Row collectors must use this, never join().
+  const pickAll = (cands, root = document) => {
+    for (const c of cands) { const els = $$(c, root); if (els.length) return els; }
+    return [];
   };
 
   // textContent minus <style>/<script> payloads. Amazon ships inline CSS *inside* feature
@@ -151,6 +162,42 @@
     return null;
   };
 
+  // Lift sub-record diagnostics onto the envelope.
+  //
+  // Through 0.1.0 these lived only where they were produced: item()._missing sat at
+  // out.item._missing while out._missing was undefined. The skill's own loop says "check
+  // _missing and _warn on every result before trusting it" — and following that instruction to
+  // the letter returned a clean bill of health on a record with a hole in it. That is the
+  // failure that HIDES the other failures, so it is fixed here at the envelope rather than by
+  // asking every reader to remember which nested key to look under.
+  //
+  // The nested copies stay exactly where they are. This is an index, not a move. `_missing`
+  // carries full paths because field names are short; `_warn` names where the prose lives
+  // rather than repeating it, because the prose is already in the same object and compactness
+  // is the product.
+  const hoist = (out, keys) => {
+    const missing = [];
+    const warned = [];
+    for (const key of keys) {
+      const rec = out[key];
+      if (!rec || typeof rec !== 'object') continue;
+      if (Array.isArray(rec._missing)) {
+        for (const f of rec._missing) missing.push(key + '.' + f);
+      }
+      for (const k of Object.keys(rec)) {
+        if (k.charAt(0) === '_' && k !== '_missing' && typeof rec[k] === 'string') {
+          warned.push(key + '.' + k);
+        }
+      }
+    }
+    if (missing.length) out._missing = missing;
+    if (warned.length) {
+      out._warn = warned.length + ' caveat(s) on this capture: ' + warned.join(', ')
+        + ' — read them before reporting.';
+    }
+    return out;
+  };
+
   // Drop nulls / empty arrays / empty objects, recursively. This is where the token savings land.
   const compact = (v) => {
     if (Array.isArray(v)) {
@@ -216,6 +263,12 @@
     return compact({ accepted: true, days: days, shippingPaidBy: payer });
   };
 
+  // Item specifics states the condition as a grade plus an essay, in one cell:
+  //   "Pre-owned - Good: This item has been gently used but is in good condition. It mi…"
+  // The grade is the part a comparison table can use; the essay is boilerplate eBay writes, not
+  // the seller, so it carries no signal. Split on the first colon and keep the left.
+  const conditionGrade = (s) => clip(clean(String(s == null ? '' : s).split(':')[0]), 60);
+
   // "Was US $55.21 (6% off)". The strikethrough node this used to be read from does not exist
   // on current item pages — .x-price-transparency--discount is where it actually lives.
   const discountInfo = (s) => {
@@ -261,10 +314,18 @@
       specValue:  ['.ux-labels-values__values-content', '.ux-labels-values__values'],
     },
     search: {
-      // li.s-item is DEAD. It is what every scraping guide on the internet still uses and it
-      // matched 0 nodes on 2026-08-27 while .su-card-container matched 70. Keep .s-card as the
-      // fallback; it matched the same 70.
-      results:    ['.su-card-container', '.s-card', 'li.s-item'],
+      // The results river. Scoping to it drops the "similar items" carousel, whose cards are the
+      // same shape but are not results — 68 of 70 cards were inside it on 2026-08-27, and the 2
+      // outside had already appeared below.
+      river:      ['#srp-river-results'],
+      // ORDER MATTERS AND THESE MUST NOT BE UNIONED. `.s-card` is the OUTER wrapper and every
+      // `.su-card-container` sits inside one, so `$$(results.join(','))` returns each card twice
+      // — 140 nodes for 70 cards, duplicates at adjacent indices. Collected with pickAll(), which
+      // takes the first candidate that matches anything. The outer wrapper goes first because it
+      // is a superset of the inner one.
+      // li.s-item is DEAD besides: it is what every scraping guide on the internet still uses and
+      // it matched 0 nodes, against 70 for each of the two above.
+      results:    ['.s-card', '.su-card-container', 'li.s-item'],
       link:       ['a[href*="/itm/"]'],
       title:      ['.s-card__title', '.s-item__title'],
       subtitle:   ['.s-card__subtitle', '.s-item__subtitle'],
@@ -276,8 +337,18 @@
 
   // Absent on plenty of healthy pages: most listings carry no discount, plenty are Buy-It-Now
   // only with no separate delivery row, and a search card need not carry a subtitle.
+  //
+  // `quantity` is in here because a single-item listing renders NO quantity widget at all — not
+  // an empty one. Verified 2026-08-27 on a pre-owned shoe listing: .x-quantity__availability and
+  // .d-quantity__availability both missed, and the page carried no "N available" or "N sold" text
+  // anywhere. Reporting that as BROKEN is the cry-wolf failure that makes health() worth ignoring.
+  //
+  // `condition` is in here for a different reason: its dedicated slot is genuinely absent on those
+  // same listings, but the value is recovered from item specifics — so a selector miss here is not
+  // a data miss. health() resolves that distinction explicitly rather than leaving it to the loop.
   const OPTIONAL = new Set([
     'discount', 'delivery', 'subtitle', 'attrRow', 'resultCount', 'specHeading',
+    'quantity', 'condition', 'river',
   ]);
 
   /* ------------------------------------------------------------- page type */
@@ -439,12 +510,25 @@
 
   /* ------------------------------------------------------------------ item */
 
-  function conditionValue() {
+  // The dedicated condition slot is absent on a large class of listings, and it fails silently.
+  // Verified 2026-08-27 on a pre-owned shoe listing: [data-testid="x-item-condition"] missed,
+  // .x-item-condition-value missed, and NOTHING on the page matched /condition/i as a class or
+  // testid — the field simply is not rendered as its own component there. The value is still
+  // present, in the item-specifics form, carrying a long explanatory tail:
+  //   "Pre-owned - Good: This item has been gently used but is in good condition. It mi…"
+  // Take the grade before the colon and drop the essay. This matters more than it looks:
+  // condition is the field eBay sellers are loosest with, and a blank that reads as "fine" is
+  // worse than one that reads as absent.
+  function conditionValue(spec) {
     const el = pick(SEL.item.condition);
-    if (!el) return null;
-    const parts = $$('.ux-textspans', el).map(txtOf).filter(Boolean);
-    const val = parts.find((t) => !/^condition\s*:?$/i.test(t));
-    return clip(val || txtOf(el), 60);
+    if (el) {
+      const parts = $$('.ux-textspans', el).map(txtOf).filter(Boolean);
+      const val = parts.find((t) => !/^condition\s*:?$/i.test(t));
+      if (val) return clip(val, 60);
+    }
+    const fromSpec = (spec === undefined ? specifics() : spec) || {};
+    if (fromSpec.Condition) return conditionGrade(fromSpec.Condition);
+    return el ? clip(txtOf(el), 60) : null;
   }
 
   function specifics() {
@@ -489,7 +573,7 @@
       itemId: id,
       url: itmUrl(id),
       title: deA11y(pickText(S.title)),
-      condition: conditionValue(),
+      condition: conditionValue(spec),
       price: price,
       currency: currency(priceRaw),
       discount: discountInfo(pickText(S.discount)),
@@ -571,18 +655,30 @@
   function searchResults(opts) {
     opts = opts || {};
     const limit = opts.limit || 24;
-    const nodes = $$(SEL.search.results.join(','));
+    // Scope to the river so the "similar items" carousel does not enter the shortlist, and
+    // collect with pickAll() rather than a joined selector — see SEL.search.results for why
+    // joining returned every card twice.
+    const root = pick(SEL.search.river) || document;
+    const nodes = pickAll(SEL.search.results, root);
     const rows = [];
+    const seen = new Set();
+    let duplicates = 0;
     for (const el of nodes) {
       if (rows.length >= limit) break;
       const r = searchRow(el);
-      if (r) rows.push(r);
+      if (!r) continue;
+      // One listing can legitimately render twice (carousel plus river, or a promoted repeat).
+      // A shortlist that carries the same item twice is never useful; first occurrence wins.
+      if (seen.has(r.itemId)) { duplicates++; continue; }
+      seen.add(r.itemId);
+      rows.push(r);
     }
 
     const out = compact({
       resultCount: num(pickText(SEL.search.resultCount)),
       shown: rows.length,
       scanned: nodes.length,
+      duplicatesDropped: duplicates || undefined,
       rows: rows,
     }) || {};
 
@@ -634,7 +730,7 @@
     } catch (e) {
       out.error = String((e && e.message) || e);
     }
-    return out;
+    return hoist(out, ['item', 'search', 'variants']);
   }
 
   /* ---------------------------------------------------------------- health */
@@ -671,6 +767,16 @@
       } else {
         report.absent.push('item.mskuModel (single-SKU listing, or the anchor moved)');
       }
+      // `condition` is OPTIONAL, so the loop above filed it under `absent` when its dedicated
+      // slot is missing. That is only half an answer: "no slot" and "no value" are different
+      // outcomes and the caller needs to know which one it has. Resolve it the way item() does.
+      const ci = report.absent.indexOf('item.condition');
+      if (ci !== -1) {
+        report.absent.splice(ci, 1);
+        const spec = specifics();
+        if (spec && spec.Condition) report.ok.push('item.condition (recovered from item specifics)');
+        else report.broken.push('item.condition (no slot AND no specifics entry — genuinely gone)');
+      }
     }
     report.summary = report.ok.length + ' ok, ' + report.absent.length
       + ' absent-but-optional, ' + report.broken.length + ' BROKEN';
@@ -699,8 +805,9 @@
     SEL: SEL,
     // Exposed for tests/parse.test.js, which runs this file under node with a stub window.
     // Not part of the caller-facing surface — do not build on it.
-    _internals: { clean, clip, money, num, currency, compact, txtOf,
-                  itemIdFrom, spans, deA11y, shippingInfo, returnsInfo, discountInfo },
+    _internals: { clean, clip, money, num, currency, compact, txtOf, pickAll, hoist,
+                  itemIdFrom, spans, deA11y, shippingInfo, returnsInfo, discountInfo,
+                  conditionGrade },
   };
   Object.defineProperty(window, '__ebayx', { value: API, writable: true, configurable: true });
   }

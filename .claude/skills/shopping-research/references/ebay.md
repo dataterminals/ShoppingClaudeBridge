@@ -10,6 +10,16 @@ await __ebayx.full({limit: 40})      // search page, more rows (default 24)
 __ebayx.health()                     // which selectors still resolve, plus the variant map
 ```
 
+## Two shapes of blank you should know about
+
+**`condition` usually arrives via item specifics, not its own field.** On pre-owned listings eBay
+renders no condition element at all, so the extractor falls back to the specifics form and keeps
+the grade before the colon — `"Pre-owned - Good"`. If you ever see `condition` empty *and*
+`health()` saying `no slot AND no specifics entry`, that is a genuine gap, not the normal path.
+
+**`quantity` empty is normal.** A single-item listing renders no quantity widget and no
+"N available" text. It is reported as absent rather than broken for that reason.
+
 ## Rank on `total`, never on `price`
 
 Every search row and item carries `{price, shipping, total}`. `total` is the sort key.
@@ -96,6 +106,9 @@ The result carries a `_warn` saying so. Carry it through to the user. On Amazon 
 count of ads removed; on eBay you must state that none were.
 
 Promo cards ("Shop on eBay") are dropped, but by requiring an item id — not by ad detection.
+
+Rows are also scoped to the results river and de-duplicated by item id, so the "similar items"
+carousel does not pad the shortlist. `duplicatesDropped` appears when any were collapsed.
 
 ## Auctions are a different unit of comparison
 

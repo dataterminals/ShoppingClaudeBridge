@@ -142,6 +142,50 @@ if (apis.length >= 2) {
     const got = JSON.stringify(a.api._internals.compact({ a: 1, b: null, c: [], d: { e: null } }));
     ok(a.name + '._internals.compact drops empties', got === '{"a":1}', 'got ' + got);
   }
+
+  // pickAll must take the FIRST candidate that matches anything, never the union. A joined
+  // selector looked equivalent and returned every eBay search row twice, because .su-card-container
+  // is nested inside .s-card. Stub root: 'outer' matches 2, 'inner' matches 2, union would be 4.
+  const stubRoot = {
+    querySelectorAll: (sel) => (sel === 'outer' ? ['a', 'b'] : sel === 'inner' ? ['c', 'd'] : []),
+    querySelector: () => null,
+  };
+  for (const a of apis) {
+    const pickAll = a.api._internals.pickAll;
+    ok(a.name + '._internals.pickAll takes only the first matching candidate',
+       JSON.stringify(pickAll(['outer', 'inner'], stubRoot)) === '["a","b"]',
+       'got ' + JSON.stringify(pickAll(['outer', 'inner'], stubRoot)));
+    ok(a.name + '._internals.pickAll falls through an empty candidate',
+       JSON.stringify(pickAll(['nope', 'inner'], stubRoot)) === '["c","d"]');
+    ok(a.name + '._internals.pickAll returns [] when nothing matches',
+       JSON.stringify(pickAll(['nope', 'nada'], stubRoot)) === '[]');
+  }
+
+  // hoist() is the envelope fix: a sub-record's _missing used to be invisible to a caller
+  // following the skill's own "check _missing on every result" instruction.
+  for (const a of apis) {
+    const h = a.api._internals.hoist;
+    const holed = h({ item: { title: 'x', _missing: ['condition', 'seller'] } }, ['item']);
+    ok(a.name + '._internals.hoist lifts _missing with a path prefix',
+       JSON.stringify(holed._missing) === '["item.condition","item.seller"]',
+       'got ' + JSON.stringify(holed._missing));
+    ok(a.name + '._internals.hoist leaves the nested copy in place',
+       JSON.stringify(holed.item._missing) === '["condition","seller"]');
+
+    const warned = h({ search: { _warn: 'ads not filtered', _auctionWarn: '3 auctions' } }, ['search']);
+    ok(a.name + '._internals.hoist names where the caveats live',
+       /search\._warn/.test(warned._warn) && /search\._auctionWarn/.test(warned._warn),
+       'got ' + warned._warn);
+    ok(a.name + '._internals.hoist does not repeat the caveat prose',
+       warned._warn.indexOf('ads not filtered') === -1, 'got ' + warned._warn);
+
+    const clean = h({ item: { title: 'x' } }, ['item']);
+    ok(a.name + '._internals.hoist stays silent on a clean record',
+       clean._missing === undefined && clean._warn === undefined);
+    const absent = h({}, ['item', 'search']);
+    ok(a.name + '._internals.hoist tolerates missing sub-records',
+       absent._missing === undefined && absent._warn === undefined);
+  }
 }
 
 if (failures.length) {

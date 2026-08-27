@@ -27,9 +27,17 @@ Common envelope on every page:
   "itemId": "225056546791",
   "title": "…",
   "capturedAt": "2026-08-27T…Z",
-  "_v": "0.1.0"
+  "_v": "0.2.0",
+  "_missing": ["item.condition"],
+  "_warn": "2 caveat(s) on this capture: search._warn, search._auctionWarn — read them before reporting."
 }
 ```
+
+**`_missing` and `_warn` are lifted from the sub-records onto the envelope.** Through 0.1.0 they
+were not: `item()._missing` sat at `.item._missing` while `._missing` was undefined, so a caller
+following the documented "check `_missing` on every result" instruction got a clean bill of health
+on a record with a hole in it. The nested copies are still there — the envelope is an index, not a
+move, and `_warn` names where the prose lives rather than repeating it.
 
 If the page is interposed, `blocked` is set and `error` says what to do:
 
@@ -83,6 +91,13 @@ sponsored detection: across a 70-card search the only candidate signal matched 7
 while forward `Sponsored` text and every class/aria candidate matched 0. Promo cards are dropped
 by requiring an `itemId`, not by ad detection.
 
+**Rows are collected from the results river and de-duplicated by item id.** Two things made that
+necessary. The candidate selectors are nested — `.su-card-container` sits inside `.s-card` — so a
+joined selector returned 140 nodes for 70 cards, every result twice at adjacent indices; rows are
+taken from the first candidate that matches anything instead. And the page renders a "similar
+items" carousel using the same card markup, whose entries also appear below. `scanned` is how many
+nodes were examined and `duplicatesDropped` appears when any were collapsed.
+
 **`_auctionWarn`** appears when any row is an auction. `price` on those rows is the current bid
 and will rise; `saleFormat` is `auction`, `bin`, or `auction+bin`.
 
@@ -118,7 +133,19 @@ Shipping has three distinguishable states:
 }
 ```
 
-`_missing` lists which of `title`, `price`, `condition`, `seller` came back empty.
+`_missing` lists which of `title`, `price`, `condition`, `seller` came back empty, and is also
+lifted onto the envelope.
+
+**`condition` falls back to item specifics, and that path is the common one.** On a pre-owned
+listing there is no condition element on the page at all — `[data-testid="x-item-condition"]`,
+`.x-item-condition-value` and every `/condition/i` class miss. The value survives in the
+item-specifics form with eBay's boilerplate essay appended, so the grade before the first colon is
+taken: `"Pre-owned - Good: This item has been gently used…"` → `"Pre-owned - Good"`. `health()`
+distinguishes the two outcomes explicitly — `item.condition (recovered from item specifics)` versus
+`item.condition (no slot AND no specifics entry — genuinely gone)`.
+
+**`quantity` is absent, not broken, on single-item listings.** Those pages render no quantity
+widget and carry no "N available" / "N sold" text anywhere.
 
 **`returns` is a tri-state**, and on anything that might not fit it is the highest-signal field on
 the page:

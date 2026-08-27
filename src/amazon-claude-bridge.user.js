@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopping Claude Bridge — Amazon
 // @namespace    https://github.com/dataterminals/ShoppingClaudeBridge
-// @version      0.5.0
+// @version      0.5.1
 // @description  Read-only extractor library for amazon.com. Exposes window.__amzx so an assistant driving the browser can pull a compact, de-sponsored JSON record of the current page instead of reading a 60 KB accessibility tree. Never clicks a buy control, submits a form, or reads credentials.
 // @author       dataterminals
 // @homepageURL  https://github.com/dataterminals/ShoppingClaudeBridge
@@ -58,7 +58,7 @@
 (function () {
   function __amzxLib() {
   'use strict';
-  const VERSION = '0.5.0';
+  const VERSION = '0.5.1';
 
   // --8<-- shared core: START. Byte-identical across every *.user.js in src/.
   // Verify with `node tests/core-parity.test.js`. These markers are `//` on purpose:
@@ -81,6 +81,17 @@
   const pick = (cands, root = document) => {
     for (const c of cands) { const el = $(c, root); if (el) return el; }
     return null;
+  };
+
+  // All elements for the FIRST candidate that matches anything — NOT the union of every
+  // candidate. `$$(cands.join(','))` looks equivalent and is not: when candidates are nested
+  // wrappers around the same row, the union returns each row once per matching candidate.
+  // Verified 2026-08-27 on an eBay search: every .su-card-container sits inside an .s-card,
+  // so the joined form returned 140 nodes for 70 cards and every result arrived twice, in
+  // adjacent pairs. Row collectors must use this, never join().
+  const pickAll = (cands, root = document) => {
+    for (const c of cands) { const els = $$(c, root); if (els.length) return els; }
+    return [];
   };
 
   // textContent minus <style>/<script> payloads. Amazon ships inline CSS *inside* feature
@@ -155,6 +166,42 @@
     if (c.includes('\u00A3')) return 'GBP';
     if (c.includes('\u20AC')) return 'EUR';
     return null;
+  };
+
+  // Lift sub-record diagnostics onto the envelope.
+  //
+  // Through 0.1.0 these lived only where they were produced: item()._missing sat at
+  // out.item._missing while out._missing was undefined. The skill's own loop says "check
+  // _missing and _warn on every result before trusting it" — and following that instruction to
+  // the letter returned a clean bill of health on a record with a hole in it. That is the
+  // failure that HIDES the other failures, so it is fixed here at the envelope rather than by
+  // asking every reader to remember which nested key to look under.
+  //
+  // The nested copies stay exactly where they are. This is an index, not a move. `_missing`
+  // carries full paths because field names are short; `_warn` names where the prose lives
+  // rather than repeating it, because the prose is already in the same object and compactness
+  // is the product.
+  const hoist = (out, keys) => {
+    const missing = [];
+    const warned = [];
+    for (const key of keys) {
+      const rec = out[key];
+      if (!rec || typeof rec !== 'object') continue;
+      if (Array.isArray(rec._missing)) {
+        for (const f of rec._missing) missing.push(key + '.' + f);
+      }
+      for (const k of Object.keys(rec)) {
+        if (k.charAt(0) === '_' && k !== '_missing' && typeof rec[k] === 'string') {
+          warned.push(key + '.' + k);
+        }
+      }
+    }
+    if (missing.length) out._missing = missing;
+    if (warned.length) {
+      out._warn = warned.length + ' caveat(s) on this capture: ' + warned.join(', ')
+        + ' — read them before reporting.';
+    }
+    return out;
   };
 
   // Drop nulls / empty arrays / empty objects, recursively. This is where the token savings land.
@@ -571,7 +618,11 @@
     opts = opts || {};
     const limit = opts.limit == null ? 24 : opts.limit;
     const S = SEL.search;
-    const nodes = $$(S.results[0]).length ? $$(S.results[0]) : $$(S.results.join(','));
+    // pickAll, not a joined selector: the join would union every candidate, and when candidates
+    // are nested wrappers around one row that returns each row once per match. Amazon's three
+    // candidates are not currently nested, so this is a latent bug here rather than a live one —
+    // it was live on the eBay half, where it returned every search result twice.
+    const nodes = pickAll(S.results);
     let sponsored = 0;
     let pos = 0;
     const out = [];
@@ -974,7 +1025,9 @@
     } catch (e) {
       out.error = String((e && e.message) || e);
     }
-    return out;
+    // Same envelope fix as the eBay half: product()._missing used to sit only at
+    // out.product._missing, so a caller checking out._missing saw nothing on a holed record.
+    return hoist(out, ['product', 'search', 'reviews', 'buyAgain', 'offers', 'variants']);
   }
 
   /* ---------------------------------------------------------------- health */
@@ -1034,7 +1087,7 @@
     // Exposed for tests/parse.test.js, which runs this file under node with a stub window.
     // Not part of the caller-facing surface — do not build on it.
     _internals: { clean, clip, money, num, currency, compact, asinFrom, txtOf, unitPrice,
-                  couponInfo, condition, purchaseMode },
+                  pickAll, hoist, couponInfo, condition, purchaseMode },
   };
   Object.defineProperty(window, '__amzx', { value: API, writable: true, configurable: true });
   }

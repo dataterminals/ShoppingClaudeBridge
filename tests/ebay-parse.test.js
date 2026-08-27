@@ -30,7 +30,7 @@ if (!ebayx) {
   process.exit(1);
 }
 const { itemIdFrom, spans, deA11y, shippingInfo, returnsInfo, discountInfo,
-        money, num } = ebayx._internals;
+        conditionGrade, money, num } = ebayx._internals;
 
 let passed = 0;
 const failures = [];
@@ -151,6 +151,23 @@ const CARD = "Denim N Jeans(31571)99.9% positiveSeller's other itemsSeller's oth
 eq('seller feedback count', num((CARD.match(/\((\d[\d,]*)\)/) || [])[1]), 31571);
 eq('seller positive percentage', parseFloat((CARD.match(/([\d.]+)\s*%\s*positive/i) || [])[1]), 99.9);
 eq('seller name up to the count', (CARD.match(/^([^(]+)\(/) || [])[1], 'Denim N Jeans');
+
+/* -------------------------------------------------------- conditionGrade()
+ * Verified 2026-08-27: on a pre-owned listing there is NO condition element on the page at all
+ * — [data-testid="x-item-condition"] misses, .x-item-condition-value misses, and nothing matches
+ * /condition/i as a class or testid. The value survives only in the item-specifics form, where
+ * eBay appends its own boilerplate essay to the grade. Blank-that-reads-as-fine is the worst
+ * outcome for the field sellers are loosest with, so the fallback is load-bearing.
+ */
+
+eq('grade split from the specifics essay',
+   conditionGrade('Pre-owned - Good: This item has been gently used but is in good condition. It may have minor cosmetic flaws.'),
+   'Pre-owned - Good');
+eq('grade from a new-with-box listing',
+   conditionGrade('New with box: A brand-new, unused, and unworn item.'), 'New with box');
+eq('grade with no essay attached', conditionGrade('Pre-Owned'), 'Pre-Owned');
+eq('grade on empty', conditionGrade(''), null);
+eq('grade on null', conditionGrade(null), null);
 
 /* ------------------------------------------------------------- API surface */
 

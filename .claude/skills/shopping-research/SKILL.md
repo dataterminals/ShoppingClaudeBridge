@@ -143,9 +143,13 @@ expect it to cost 10–30× the tokens.
    through UI.
 2. `await __amzx.full()` / `await __ebayx.full()`. Both are async; return the call directly, the
    eval has REPL semantics and top-level `await` works.
-3. Check `_missing` and `_warn` on **every** result before trusting it. A thin capture is far more
-   often a broken selector than a genuinely sparse product. If they're substantial, run
-   `health()` before believing anything.
+3. Check `_missing` and `_warn` on **every** result before trusting it. `full()` lifts both onto
+   the top level, so the envelope is enough — you do not have to remember which nested key a hole
+   was reported under. (Before 0.2.0 it did not, and this instruction quietly returned a clean
+   bill of health on a holed record.) `_missing` carries full paths like `item.condition`;
+   `_warn` names where the caveat prose lives. A thin capture is far more often a broken selector
+   than a genuinely sparse product — if either is substantial, run `health()` before believing
+   anything.
 4. Report as a comparison table, not prose.
 
 **Extra data costs a navigation, not an option flag.** Neither library makes network requests.

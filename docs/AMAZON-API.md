@@ -2,6 +2,12 @@
 
 Every call is synchronous except `full()`. (`criticalReviews()` was removed in v0.2.0 and
 `offers()` has been synchronous since the fetch path went with it.)
+
+**As of 0.5.1, `full()` lifts `_missing` and `_warn` from its sub-records onto the envelope.**
+Before that they lived only where they were produced — `product()._missing` at `.product._missing`
+with `._missing` undefined — so checking the envelope reported a clean capture on a holed record.
+The nested copies stay; the envelope is an index. `_missing` carries paths like `product.price`;
+`_warn` names which sub-records carry caveat prose.
 All output is pruned: nulls, empty objects and empty arrays are dropped before returning.
 
 ## `full(opts?)` → Promise\<object\>
