@@ -60,6 +60,10 @@
   'use strict';
   const VERSION = '0.5.0';
 
+  // --8<-- shared core: START. Byte-identical across every *.user.js in src/.
+  // Verify with `node tests/core-parity.test.js`. These markers are `//` on purpose:
+  // bin/vendor.js drops whole-line // comments, so adding them leaves the vendored
+  // asset byte-identical and neither --check gate needs re-baselining.
   /* ---------------------------------------------------------------- utils */
 
   const $ = (sel, root = document) => { try { return root.querySelector(sel); } catch { return null; } };
@@ -170,6 +174,7 @@
     if (typeof v === 'string') return clean(v);
     return v === undefined ? null : v;
   };
+  // --8<-- shared core: END.
 
   // Coupon text is prose, and the number buried in it is usually the largest single lever on the
   // page — 30% on a $21.85 item bought two at a time is a $13.11 swing. The trap is that the
