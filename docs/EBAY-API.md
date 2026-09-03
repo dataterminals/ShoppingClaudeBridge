@@ -27,7 +27,7 @@ Common envelope on every page:
   "itemId": "225056546791",
   "title": "…",
   "capturedAt": "2026-08-27T…Z",
-  "_v": "0.2.0",
+  "_v": "0.4.0",
   "_missing": ["item.condition"],
   "_warn": "2 caveat(s) on this capture: search._warn, search._auctionWarn — read them before reporting."
 }
@@ -53,9 +53,13 @@ Never interact with the challenge, and never loop.
 
 ### On a search page
 
+**Rows live under `search.rows` here and `search.results` on Amazon.** Different keys, same
+idea. Reading the wrong one looks like an empty search, and did, in a cross-market session.
+
 ```json
 {
   "search": {
+    "query": "vans sk8-hi womens 9",
     "shown": 24,
     "scanned": 70,
     "rows": [
@@ -114,6 +118,20 @@ Shipping has three distinguishable states:
 | `{cost: 5.83}` | a parsed surcharge |
 | `cost` absent | **did not parse.** `total` is absent too, deliberately — never treat unknown as zero |
 
+**A facet filter can eat the page, and since 0.4.0 that is detected.** On 2026-09-03,
+`&Size=L&Color=Black%7CGray` on a 300-result query rendered **0 rows** with no error and no
+warning. The page is mechanically distinguishable from an empty search — a result count, no rows,
+filters on the URL — so `search()` reports:
+
+| Field | Meaning |
+|---|---|
+| `filterParams` | the narrowing parameters on the URL (`["Size=L", "Color=Black\|Gray"]`); `_nkw`, `_sop`, `_pgn` and tracking noise are excluded |
+| `appliedFilters` | what the page's own chips say is applied (`["Size: L", "Black", "Gray"]`), in either of the two layouts eBay serves for the same URL — separate chips, or a collapsed "3 filters applied" flyout. Both mark each applied aspect with a "Remove filter" affordance, which is what the extractor keys on |
+| `_emptyWarn` | zero rows: names the count, the filters, and says to drop them and filter in your own analysis. With nothing on the URL it points at `health()` instead |
+
+The same URL rendered 64 rows on another machine the same day, so treat the failure as
+intermittent rather than as a property of those parameters.
+
 ---
 
 ### On an item page
@@ -133,7 +151,9 @@ Shipping has three distinguishable states:
     "seller": { "name": "…", "feedbackCount": 31571, "positivePct": 99.9 },
     "quantity": { "available": 2, "sold": 236 },
     "specifics": { "Brand": "VANS", "Model": "VN000D5IB8C", "…": "…" },
-    "styleCode": "VN000D5IB8C"
+    "styleCode": "VN000D5IB8C",
+    "images": { "count": 9, "url": "https://i.ebayimg.com/images/g/…/s-l1600.webp",
+                "description": "Black high-top canvas sneakers with white laces, on a wooden floor." }
   }
 }
 ```
@@ -174,6 +194,19 @@ checked `Model` first, which is a model-*family* name shared by every colorway (
 opposite of what it documents. It is the only reliable colorway identifier on a platform where one
 shoe is listed as "Burnt Ochre", "Tan" and "Brown" by three different sellers, and dedupe depends
 on it.
+
+**`_silhouetteWarn` fires when the specifics carry `Style`, `Leg Style`, `Silhouette` or `Fit`.**
+Those are dropdowns the seller clicked past on the way to listing; the typed fields on the same
+form are claims about a tape measure. Verified 2026-09-03 on a listing whose form was unusually
+complete — `Inseam: 28.5 in`, `Rise: High`, `Waist Size: 30 in`, all right — and `Style: Ankle`
+on a garment the photographs show to be a flare. The warning names the field and its value and
+stays silent on the measurements, or it becomes the always-on kind nobody reads.
+
+**`images` is as far as markup takes a photograph.** `count` is the number of distinct photos,
+`url` the first one at full size (`s-l1600`; the carousel serves `s-l500`), and `description` is
+eBay's own machine-written caption of the first photo, which is the only textual path from the
+picture to the caller. To see the picture itself, navigate a tab to `url` and take a screenshot —
+the route, and what does not work, are in the skill.
 
 ---
 

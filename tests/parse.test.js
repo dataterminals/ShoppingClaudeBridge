@@ -29,7 +29,8 @@ if (!amzx) {
   process.exit(1);
 }
 const { clean, clip, money, num, currency, compact, asinFrom, txtOf, unitPrice,
-        couponInfo, condition, purchaseMode } = amzx._internals;
+        couponInfo, condition, purchaseMode, chartFromGrid, chartDiff, cellVal,
+        fullImage } = amzx._internals;
 
 let passed = 0;
 const failures = [];
@@ -208,9 +209,85 @@ eq('promo select-option', couponInfo('Coupon available when you select this opti
 eq('promo always yields a percentage when one is present',
    couponInfo('Save 10%  when you reorder 5 qualifying items with brand promotion').pct, 10);
 
+/* ------------------------------------------------------- chartFromGrid() ---
+ * Two live grids from 2026-09-03. The first is Amazon's size-chart widget on a full-length
+ * legging listing — sizes DOWN the first column — and its label reads "US CAPRI LEGGINGS": the
+ * inseam row (19.7-21.3") belongs to a different garment than the one on the page, whose A+
+ * image reads 27.2-27.6". The parser's job is to keep that row legible so the disagreement is
+ * visible, not to decide which chart is right.
+ */
+const WIDGET = [
+  ['Brand Size', 'US Size', 'Waist (in)', 'Hip (in)', 'Inseam (in)'],
+  ['XS', '0-2', '24 - 26', '34 - 36', '19.7'],
+  ['S', '4-6', '26 - 28', '36 - 38', '19.7'],
+  ['M', '8-10', '28 - 30', '38 - 40', '19.7'],
+  ['L', '12-14', '30 - 32', '40 - 42.5', '20.1'],
+  ['XL', '16-18', '32 - 34', '42.5 - 45', '20.5'],
+  ['XXL', '20-22', '35 - 37', '45 - 48', '21.3'],
+];
+const widget = chartFromGrid(WIDGET);
+eq('widget grid: sizes read down the first column', widget.sizes, ['XS', 'S', 'M', 'L', 'XL', 'XXL']);
+eq('widget grid: inseam row aligned to sizes', widget.measures['Inseam (in)'], [19.7, 19.7, 19.7, 20.1, 20.5, 21.3]);
+eq('widget grid: ranges stay strings', widget.measures['Waist (in)'][3], '30 - 32');
+eq('widget grid: US size row kept', widget.measures['US Size'][0], '0-2');
+
+// Seller-written tables usually run sizes ACROSS the header instead.
+const ACROSS = [['Size', 'S', 'M', 'L'], ['Waist', '26-28', '28-30', '30-32'], ['Inseam', '28', '28', '28']];
+eq('across grid: sizes from the header', chartFromGrid(ACROSS).sizes, ['S', 'M', 'L']);
+eq('across grid: inseam row', chartFromGrid(ACROSS).measures.Inseam, [28, 28, 28]);
+
+// Key/value spec tables and comparison tables are not size charts and must not be reported as one.
+eq('spec table is not a chart', chartFromGrid([['Color', 'Black'], ['Fit Type', 'Regular']]), null);
+eq('empty grid', chartFromGrid([]), null);
+eq('single row', chartFromGrid([['Size', 'S', 'M']]), null);
+eq('sizes without a measurement row', chartFromGrid([['Size', 'S', 'M'], ['Colour', 'Black', 'Black']]), null);
+
+/* ---------------------------------------------------------- chartDiff() ---
+ * Two of the three widget charts on a three-fit listing (25" and 28" inseam). The first in DOM
+ * order was the 25" one — on the 28" variant's own page.
+ */
+const FIT25 = chartFromGrid([
+  ['Brand Size', 'Waist (in)', 'Hip (in)', 'Inseam (in)', 'Length (in)'],
+  ['S', '25.2 - 27.2', '36 - 38', '25.8', '35'],
+  ['M', '27.2 - 29.2', '38.1 - 40.1', '26.2', '35.8'],
+  ['L', '29.1 - 31.1', '40.1 - 42.1', '26.6', '36.6'],
+]);
+const FIT28 = chartFromGrid([
+  ['Brand Size', 'Waist (in)', 'Hip (in)', 'Inseam (in)', 'Length (in)'],
+  ['S', '25.2 - 27.2', '36 - 38', '28', '37.8'],
+  ['M', '27.2 - 29.2', '38.1 - 40.1', '28.3', '38.6'],
+  ['L', '29.1 - 31.1', '40.1 - 42.1', '28.7', '39.4'],
+]);
+const diffs = chartDiff(FIT25, FIT28);
+eq('chartDiff finds the inseam disagreement', diffs.some((x) => /Inseam \(in\) at L: 26\.6 vs 28\.7/.test(x)), true);
+eq('chartDiff does not flag identical waist rows', diffs.some((x) => /Waist/.test(x)), false);
+eq('chartDiff caps at four', diffs.length <= 4, true);
+eq('chartDiff on identical charts', chartDiff(FIT28, FIT28), []);
+eq('chartDiff tolerates null', chartDiff(null, FIT28), []);
+// A range cell against a range cell compares both ends. (Two size columns: a grid with one size
+// token is not accepted as a chart, and should not be — a key/value table has one value column.)
+eq('chartDiff compares ranges', chartDiff(
+  chartFromGrid([['Size', 'S', 'M'], ['Waist', '26 - 28', '28 - 30']]),
+  chartFromGrid([['Size', 'S', 'M'], ['Waist', '26 - 30', '28 - 30']])), ['Waist at S: 26-28 vs 26-30']);
+
+/* ------------------------------------------------------------ cellVal() --- */
+eq('cellVal lone figure', cellVal('19.7'), 19.7);
+eq('cellVal range stays a string', cellVal('40 - 42.5'), '40 - 42.5');
+eq('cellVal empty', cellVal(''), null);
+
+/* ---------------------------------------------------------- fullImage() ---
+ * A+ image URLs carry a crop suffix that trims the upload to the module's aspect ratio.
+ */
+eq('fullImage strips the crop suffix',
+   fullImage('https://m.media-amazon.com/images/S/aplus-media-library-service-media/dd95d962-a2c9.__CR0,0,1464,600_PT0_SX1464_V1___.jpg'),
+   'https://m.media-amazon.com/images/S/aplus-media-library-service-media/dd95d962-a2c9.jpg');
+eq('fullImage leaves a plain url alone', fullImage('https://m.media-amazon.com/images/I/abc.jpg'),
+   'https://m.media-amazon.com/images/I/abc.jpg');
+eq('fullImage null', fullImage(null), null);
+
 /* ------------------------------------------------------- surface check --- */
 for (const fn of ['page', 'product', 'search', 'reviews', 'offers', 'buyAgain',
-                  'full', 'health', 'text']) {
+                  'charts', 'histogram', 'full', 'health', 'text']) {
   eq(`API exposes ${fn}()`, typeof amzx[fn], 'function');
 }
 eq('API reports a version', typeof amzx.version, 'string');

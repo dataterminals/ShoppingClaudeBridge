@@ -92,7 +92,9 @@ Only once the probe returns `1`:
   environment. Report that plainly instead of substituting a different browser and implying the
   results are equivalent.
 - **Signed out** → on Amazon, `#nav-link-accountList` reads "Sign in". Say the figures are the
-  signed-out view. **Do not sign in**, and do not present them as the user's own.
+  signed-out view. **Do not sign in**, and do not present them as the user's own. The reviews page
+  redirects a signed-out browser to sign-in (`blocked: "signin"`); the product page carries the
+  same sample, so use `full({reviews: true})` there instead.
 - **No filesystem / no `store/`** → purchase-history answers are unavailable. Do not guess, and do
   not scrape order pages.
 
@@ -159,7 +161,9 @@ expect it to cost 10–30× the tokens.
 1. Navigate the tab to a URL you built from the parameters in the site reference — don't click
    through UI.
 2. `await __amzx.full()` / `await __ebayx.full()`. Both are async; return the call directly, the
-   eval has REPL semantics and top-level `await` works.
+   eval has REPL semantics and top-level `await` works. Search rows are under **`search.results`
+   on Amazon and `search.rows` on eBay** — different keys, same idea, and reading the wrong one
+   looks exactly like an empty search.
 3. Check `_missing` and `_warn` on **every** result before trusting it. `full()` lifts both onto
    the top level, so you do not have to remember which nested key a hole was reported under.
    (Before 0.2.0 it did not, and this instruction quietly returned a clean bill of health on a
@@ -198,6 +202,33 @@ Do not retry, do not cycle user agents or headers, and never work around a bot c
 A refusal is a result, not an obstacle to be re-attempted in a different shape. A comparison you
 could not complete belongs in the report as a stated gap — silence reads as "I checked and Amazon
 was cheapest", which is a different claim entirely.
+
+## Seeing a picture
+
+Neither library can see an image, and on 2026-09-03 that cost two wrong recommendations in one
+session: a size chart that lived in an A+ image while the HTML chart belonged to a different
+garment, and a "Style: Ankle" listing that the photographs showed to be a flare. Both were caught
+by a human looking at the page. The libraries now hand over what markup can reach —
+`charts.candidates[].url` and `product.image` on Amazon, `item.images.url` and
+`item.images.description` (eBay's own caption of the first photo) on eBay — and the rest is a
+screenshot.
+
+**The route that works:** navigate the tab to the image URL and take a `computer` screenshot
+(`zoom` on a region if the figures are small). Verified 2026-09-03: a 1464×600 A+ size chart was
+legible at half scale, and read L inseam 27.4" where the HTML chart said 20.1". An eBay `s-l1600`
+photo rendered the same way.
+
+**The routes that do not:**
+
+| Route | Result |
+|---|---|
+| `upload_image` | pushes a captured screenshot **into** a page's file input — the opposite direction. Not an image-reading tool |
+| image bytes through `javascript_tool` | base64 payloads are blocked in the return channel |
+| `curl` from a cloud container | egress refuses `i.ebayimg.com` |
+| `computer screenshot` through the Chrome extension | timed out at 30 s, twice, on one machine that day — including on a bare image URL |
+
+If the screenshot times out, say so, hand the user the URL, and stop. Do not loop it. A
+recommendation that depends on a picture nobody has seen belongs in the report as a stated gap.
 
 ## Reporting
 

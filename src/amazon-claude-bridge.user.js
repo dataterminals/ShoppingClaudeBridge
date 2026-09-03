@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopping Claude Bridge — Amazon
 // @namespace    https://github.com/dataterminals/ShoppingClaudeBridge
-// @version      0.6.0
+// @version      0.7.0
 // @description  Read-only extractor library for amazon.com. Exposes window.__amzx so an assistant driving the browser can pull a compact, de-sponsored JSON record of the current page instead of reading a 60 KB accessibility tree. Never clicks a buy control, submits a form, or reads credentials.
 // @author       dataterminals
 // @homepageURL  https://github.com/dataterminals/ShoppingClaudeBridge
@@ -58,7 +58,7 @@
 (function () {
   function __amzxLib() {
   'use strict';
-  const VERSION = '0.6.0';
+  const VERSION = '0.7.0';
 
   // --8<-- shared core: START. Byte-identical across every *.user.js in src/.
   // Verify with `node tests/core-parity.test.js`. These markers are `//` on purpose:
@@ -439,18 +439,45 @@
     },
     reviews: {
       card:       ['div[data-hook="review"]', '.review'],
-      rTitle:     ['[data-hook="review-title"] span:not(.a-icon-alt)', '[data-hook="review-title"]'],
+      // AMAZON RENAMED BOTH TEXT HOOKS. Verified 2026-09-03 on two apparel listings: review-title
+      // and review-body matched 0 of 8 cards; reviewTitle and reviewText matched 8 of 8. The
+      // stars, date, badge and helpful hooks kept their old names — which is why a capture came
+      // back carrying exactly those four fields and no prose, a record that was 90% hole and
+      // read as complete. The old names stay as fallbacks in case the reviews page still uses
+      // them; that page now redirects a signed-out browser to sign-in, so it could not be checked.
+      rTitle:     ['[data-hook="reviewTitle"]', '[data-hook="review-title"] span:not(.a-icon-alt)',
+                   '[data-hook="review-title"]'],
       rStars:     ['[data-hook="review-star-rating"] .a-icon-alt', '[data-hook="cmps-review-star-rating"] .a-icon-alt'],
       rDate:      ['[data-hook="review-date"]'],
-      rBody:      ['[data-hook="review-body"] span', '[data-hook="review-body"]'],
+      // reviewText is a card deck whose textContent opens with two screen-reader hints ("Brief
+      // content visible, double tap to read full content.") and closes with "Read more". The
+      // prose itself sits in reviewRichContentContainer, so anchor there.
+      rBody:      ['[data-hook="reviewRichContentContainer"]', '[data-hook="reviewText"] .a-cardui-content',
+                   '[data-hook="review-body"] span', '[data-hook="review-body"]'],
+      // "Size: XX-Large" / "Color: Black", one span per attribute with an icon between. On a
+      // multi-fit listing this carries "Fit Type: 4 Pockets 28" Inseam", and it is the only thing
+      // on the page that says which variant a review is about.
+      rFormat:    ['[data-hook="format-strip"] > span', '[data-hook="format-strip"]'],
       rVerified:  ['[data-hook="avp-badge"]'],
       rHelpful:   ['[data-hook="helpful-vote-statement"]'],
-      // The histogram stopped being a <table>; '#histogramTable tr' matched nothing for a while
-      // and the distribution silently came back empty. Percentages now live in leaf spans, and
-      // the page renders the whole set twice, so take the first five. Verified 2026-08-21:
-      // 79/10/6/2/3 weights to a 4.60 average, which confirms they run 5-star first.
-      histPct:    ['#histogramTable .histogram-column-space'],
+      // The histogram is a <ul>, and its percentages moved into a content-hashed CSS-module class
+      // (_cr-ratings-histogram_style_histogram-column-space__RKUAd), so the old
+      // .histogram-column-space matched nothing and the distribution came back empty on every
+      // product page with nothing reporting it. Each row's meter carries the figure as
+      // aria-valuenow, there are exactly five, and they run 5-star first — verified 2026-09-03:
+      // 76/12/5/4/3 on a 4.5-star listing. The class fallbacks match the middle segment, which
+      // is the only part of a hashed name that holds across deploys.
+      hist:       ['#histogramTable .a-meter[aria-valuenow]',
+                   '#histogramTable [class*="histogram-column-space"]',
+                   '#histogramTable .histogram-column-space'],
       ratingsTotal: ['[data-hook="total-review-count"]', '#acrCustomerReviewText'],
+      // The reviews module's own pager, and only that. This was a bare `.a-pagination`, which on
+      // a PRODUCT page matches the inline twister's size pager
+      // (#tp-inline-twister-dim-values-container, verified 2026-09-03) — so the ceiling check
+      // concluded the sample could be paged, and the "only 8 of 132 are reachable" warning never
+      // fired on the one page where the sample now lives.
+      pagination: ['#cm_cr-pagination_bar .a-pagination', '[data-hook="pagination-bar"]',
+                   '#cm_cr-pagination_bar', '.cr-pagination-footer'],
     },
     offers: {
       // `div[id^="aod-offer"]` is WRONG and was the original bug: every child div inside an
@@ -467,14 +494,44 @@
       oShip:      ['#aod-offer-shipsFrom .a-col-right span', '[id^="aod-offer-shipsFrom"] .a-col-right'],
       oCondition: ['#aod-offer-heading'],
     },
+    // Size charts — see charts(). Probed live 2026-09-03 on two apparel listings.
+    charts: {
+      // Amazon's own size-chart widget is a PRELOADED popover: the tables are in the DOM at
+      // document-idle, hidden, one div#fit-sizechartv2-N per chart with an <h5> label above each
+      // table. One chart on a single-fit listing, three on a three-fit one — and the first in DOM
+      // order is not necessarily the selected fit's.
+      widget:      ['#sizeChartV2Data_feature_div div[id^="fit-sizechartv2-"]',
+                    '.fit-sizechartv2-tables-wrapper div[id^="fit-sizechartv2-"]',
+                    'div[id^="fit-sizechartv2-"]'],
+      // Scoped to one widget div. Not checked on their own by health() — see SCOPED.
+      widgetLabel: ['h5', 'h4', 'h3', '.a-text-bold'],
+      widgetTable: ['table'],
+      // Seller-written tables elsewhere on the page, kept only when chartFromGrid() accepts them.
+      table:       ['#aplus table', '#aplus_feature_div table', '#productDescription table'],
+      // A+ images carry no usable alt text — every image on both listings was alt="1" — so the
+      // only markup that says "this picture is a size chart" is the module's own heading
+      // ("Get the Right Size for Maximum Performance" sat above the chart that mattered).
+      aplusModule: ['#aplus .aplus-module', '#aplus_feature_div .aplus-module'],
+      aplusHeading:['h1,h2,h3,h4,h5'],
+      // Kept for brands that DO write alts; matched nothing on either listing probed.
+      sizeImg:     ['img[alt*="size chart" i]', 'img[alt*="size guide" i]', 'img[alt*="sizing chart" i]'],
+    },
   };
+
+  // Registry entries that only make sense relative to a parent element. health() resolves every
+  // other field against the whole document, and 'table' or 'h5' would match something on any page.
+  const SCOPED = new Set(['widgetLabel', 'widgetTable', 'aplusHeading']);
 
   // Fields that are legitimately absent on plenty of perfectly healthy pages: most products
   // have no coupon, no strikethrough list price, no badge. health() reports these as `absent`
   // rather than `broken`, so a genuine selector break is not buried in expected noise.
   const OPTIONAL = new Set([
     'wasPrice', 'unitPrice', 'coupon', 'badgeChoice', 'badgeBest', 'delivery', 'byline',
-    'detailList', 'brandRow', 'thumb', 'link', 'badge', 'histRow', 'rVerified', 'rHelpful',
+    'detailList', 'brandRow', 'thumb', 'link', 'badge', 'rVerified', 'rHelpful',
+    // A review names its variant only on variation listings; a pager exists only on the reviews page.
+    'rFormat', 'pagination',
+    // Most of the catalogue has no size chart of any kind. On apparel, charts() says which.
+    'widget', 'table', 'aplusModule', 'sizeImg',
     // Buy Again: a card carries a strikethrough list price, a Subscribe & Save pill and a promo
     // only sometimes — 13, 12 and 10 of 24 respectively on 2026-08-27. Their absence is normal.
     'bPill', 'bPromo',
@@ -493,6 +550,7 @@
     // Before the others: /gp/buyagain is matched by none of them, so it fell through to
     // 'unknown' until v0.5.0 and the caller got no extractor on the page a reorder starts from.
     if (/\/buyagain|\/gp\/buy-again/.test(p)) return 'buyagain';
+    if (/^\/ap\/signin/.test(p)) return 'signin';
     if (/\/product-reviews\//.test(p)) return 'reviews';
     if (/\/(dp|gp\/product)\//.test(p)) return 'product';
     if (/^\/s\b/.test(p) || location.search.includes('k=')) return 'search';
@@ -507,6 +565,9 @@
     if ($('#productTitle') || $('div.s-main-slot')) return null;
     const body = document.body ? document.body.innerText : '';
     if ($('form[action*="validateCaptcha"]') || /Enter the characters you see below/i.test(body)) return 'captcha';
+    // /product-reviews/ sends a signed-out browser to /ap/signin (verified 2026-09-03). Say so,
+    // rather than returning an empty reviews record that reads like a product with no reviews.
+    if (/^\/ap\/signin/.test(location.pathname) || $('#ap_email, #ap_email_login, form[name="signIn"]')) return 'signin';
     if (/Sorry! Something went wrong/i.test(body)) return 'error-page';
     return null;
   }
@@ -592,6 +653,10 @@
       rating: compact({
         stars: ratingValue(),
         count: num(pickText(S.ratingCount)),
+        // Percent per star, 5-star first. The one aggregate the review sample cannot distort,
+        // and it renders on the product page — which for a signed-out browser is the only page
+        // it renders on.
+        distribution: (histogram() || {}).distribution,
       }),
       availability: clip(pickText(S.availability), 80),
       shipsFrom: clip(pickText(S.shipsFrom), 60),
@@ -785,6 +850,34 @@
 
   /* --------------------------------------------------------------- reviews */
 
+  // Percent of ratings per star, 5-star first, from the histogram on whichever page this is.
+  // Returns {distribution} plus a _warn when the five figures read cannot be the five star rows,
+  // because a selector that starts matching the wrong five spans produces a distribution that
+  // looks exactly like a real one.
+  function histogram(doc) {
+    doc = doc || document;
+    const els = pickAll(SEL.reviews.hist, doc);
+    if (!els.length) return null;
+    let pcts = els.map((e) => (e.getAttribute ? e.getAttribute('aria-valuenow') : null))
+      .filter((v) => v != null && /^\d{1,3}$/.test(v)).map(Number);
+    if (pcts.length !== 5) {
+      // Text fallback. Each histogram row renders all five percentages (visible one plus four
+      // aria-hidden), so the first five in DOM order are the first row's set, 5-star first.
+      pcts = els.map((e) => txtOf(e)).filter((x) => /^\d{1,3}%$/.test(x || ''))
+        .slice(0, 5).map((x) => parseInt(x, 10));
+    }
+    if (pcts.length !== 5) return null;
+    const distribution = {};
+    pcts.forEach((p, i) => { distribution[(5 - i) + 'star'] = p; });
+    const out = { distribution: distribution };
+    const sum = pcts.reduce((a, b) => a + b, 0);
+    if (sum < 90 || sum > 110) {
+      out._warn = 'Histogram percentages sum to ' + sum + '%, so the five figures read are probably '
+        + 'not the five star rows. SEL.reviews.hist has rotted — do not quote this distribution.';
+    }
+    return out;
+  }
+
   function reviewsOn(doc, opts) {
     doc = doc || document;
     opts = opts || {};
@@ -792,12 +885,7 @@
     const limit = opts.limit == null ? 8 : opts.limit;
     const allCards = pickAll(S.card, doc);
     const cards = allCards.slice(0, limit);
-    const dist = {};
-    const pcts = pickAll(S.histPct, doc)
-      .map((e) => txtOf(e))
-      .filter((x) => /^\d{1,3}%$/.test(x || ''))
-      .slice(0, 5);
-    pcts.forEach((p, i) => { dist[(5 - i) + 'star'] = p; });
+    const hist = histogram(doc);
     const sample = cards.map((c) => {
         const sm = (pickText(S.rStars, c) || '').match(/([\d.]+)/);
         const dt = pickText(S.rDate, c);
@@ -805,11 +893,24 @@
           stars: sm ? parseFloat(sm[1]) : null,
           title: clip(pickText(S.rTitle, c), 100),
           date: clip(dt ? dt.replace(/^Reviewed in\s+/i, '') : null, 60),
+          // "Size: Large | Color: Black" — or "Fit Type: 4 Pockets 28" Inseam | …" on a multi-fit
+          // listing, where it is the only thing on the page saying which variant a review is
+          // about. Verified 2026-09-03: on an 879-rating child every sampled review named the
+          // child's own fit, which confirmed a split pool independently of the rating count.
+          format: clip(pickAll(S.rFormat, c).map(txtOf).filter(Boolean).join(' | '), 100),
           verified: pick(S.rVerified, c) ? true : null,
           helpful: num(pickText(S.rHelpful, c)),
-          body: clip(pickText(S.rBody, c), 300),
+          // The body is the record. Through 0.6.0 it was silently absent (see SEL.reviews) and a
+          // capture of eight star counts passed for a review sample.
+          body: clip(pickText(S.rBody, c), opts.bodyChars == null ? 400 : opts.bodyChars),
         });
     });
+    // Review dates against the listing's own age are the cheapest contamination check there is:
+    // reviews dated 2020 on an ASIN first listed in 2025 describe some other product, and stars
+    // alone cannot show it. full({reviews: true}) compares these against "Date First Available".
+    const stamps = sample.map((r) => Date.parse(String(r.date || '').replace(/^.*?\bon\s+/i, '')))
+      .filter((d) => Number.isFinite(d));
+    const iso = (ms) => new Date(ms).toISOString().slice(0, 10);
 
     // THE REVIEW ENDPOINT IS CAPPED AND ITS PARAMETERS ARE INERT.
     //
@@ -824,7 +925,7 @@
     // reader handed eight glowing reviews will otherwise treat them as the verdict.
     const shown = allCards.length;
     const total = num(pickText(S.ratingsTotal, doc));
-    const paginated = !!$('.a-pagination, [data-hook="pagination-bar"]', doc);
+    const paginated = !!pick(S.pagination, doc);
     const capped = shown > 0 && !paginated && total != null && total > shown;
 
     const qs = new URLSearchParams(location.search);
@@ -839,23 +940,27 @@
     if (ignored.length && qs.get('sortBy')) ignored.push('sortBy=' + qs.get('sortBy') + ' (assumed)');
 
     const out = compact({
-      distribution: dist,
+      distribution: hist && hist.distribution,
       sampling: compact({
         n: shown,
         ratingsTotal: total,
         coverage: (total && shown) ? (Math.round((shown / total) * 1000) / 10) + '%' : null,
+        earliest: stamps.length ? iso(Math.min.apply(null, stamps)) : null,
+        latest: stamps.length ? iso(Math.max.apply(null, stamps)) : null,
         ceiling: capped || undefined,
         complete: capped ? false : undefined,
       }),
       sample: sample,
     }) || {};
 
+    if (hist && hist._warn) out._histWarn = hist._warn;
     if (ignored.length) {
       out._warn = 'Amazon IGNORED these parameters: ' + ignored.join(', ')
         + '. The returned reviews do not match what was asked for — do not describe them as filtered or sorted.';
     } else if (capped) {
-      out._warn = 'Only ' + shown + ' of ' + total + ' reviews are reachable and there is no way to page further. '
-        + 'This sample is not representative. The star distribution is the only trustworthy figure here.';
+      out._warn = 'Only ' + shown + ' of ' + total + ' reviews are reachable and there is no way to page further '
+        + '(the reviews page needs a signed-in session and ignores its filters). This sample is not '
+        + 'representative. The star distribution is the only trustworthy figure here.';
     }
     return out;
   }
@@ -1017,6 +1122,218 @@
     return out;
   }
 
+  /* ---------------------------------------------------------------- charts */
+  //
+  // WHY THIS EXISTS. On 2026-09-03 a `querySelectorAll('table')` sweep of an apparel listing found
+  // one size chart, reading L inseam 20.1", and the figure went into a recommendation. The chart
+  // for the garment actually on the page was an A+ IMAGE reading 27.4" — the difference between a
+  // capri and a full-length legging. Amazon's widget had rendered the brand's chart for a
+  // different garment in the same line, and nothing in the markup said so... except the widget's
+  // own label, which read "US CAPRI LEGGINGS" on a listing whose specs say "Long Length".
+  //
+  // A second listing carried THREE widget charts, one per fit type, and the first in DOM order
+  // belonged to the 25"-inseam fit while the page was the 28"-inseam variant's own.
+  //
+  // So this does not pick a chart. It enumerates every candidate, parses what is parseable, keeps
+  // each widget chart's label, says which label matches the selected variant, reports where the
+  // parsed charts disagree, and hands over the URL of any image it cannot read. Knowing that it
+  // does not know is the deliverable — the same discipline as _dilution and the eBay ad _warn.
+
+  const SIZE_TOKEN_RE = /^(XXXS|XXS|XS|S|M|L|XL|XXL|XXXL|[2-6]XL|\d{1,2}(?:\s*-\s*\d{1,2})?|one size)$/i;
+  const MEASURE_RE = /\b(waist|hips?|inseam|bust|chest|length|rise|sleeves?|shoulders?|thigh|neck|height|weight|(?:us|uk|eu) size)\b/i;
+  const SIZE_HEADING_RE = /\b(size|sizing|fit guide|measurements?)\b/i;
+  // Words in a widget label that say nothing about WHICH garment it is for.
+  const LABEL_NOISE_RE = /^(size|sizes|chart|inch|inches|women|womens|women's|men|mens|men's|unisex|brand|guide|standard|regular|plus|petite|tall|adult|kids|girls|boys|inseam|length|waist|hips?|rise|bust|chest|pockets?)$/i;
+
+  const cellNums = (s) => ((clean(s) || '').match(/\d+(?:\.\d+)?/g) || []).map(Number);
+  // A lone figure becomes a number; a range or a word stays a string; an empty cell is null.
+  const cellVal = (s) => {
+    const c = clean(s);
+    if (!c) return null;
+    return /^\d+(?:\.\d+)?$/.test(c) ? parseFloat(c) : c;
+  };
+
+  // [[cell text]] -> {sizes, measures}, sizes as columns and one row per measurement, or null when
+  // the grid does not look like a size chart. Amazon's widget runs sizes DOWN the first column;
+  // seller tables usually run them ACROSS the header. Both are accepted and the grid is transposed
+  // as needed, so measures["Inseam (in)"][i] is always the figure for sizes[i].
+  function chartFromGrid(grid) {
+    const rows = (grid || []).map((r) => (r || []).map((c) => clean(c) || ''));
+    if (rows.length < 2 || rows[0].length < 2) return null;
+    const isSize = (c) => SIZE_TOKEN_RE.test(c);
+    const across = rows[0].slice(1).filter(isSize).length;
+    const down = rows.slice(1).map((r) => r[0]).filter(isSize).length;
+    let g = rows;
+    if (down >= 2 && down > across) {
+      const width = Math.max.apply(null, rows.map((r) => r.length));
+      g = [];
+      for (let i = 0; i < width; i++) g.push(rows.map((r) => (r[i] == null ? '' : r[i])));
+    } else if (across < 2) {
+      return null;
+    }
+    const sizes = g[0].slice(1);
+    const measures = {};
+    let labelled = 0;
+    for (const r of g.slice(1)) {
+      if (!r[0] || !r.slice(1).some(Boolean)) continue;
+      if (MEASURE_RE.test(r[0])) labelled++;
+      measures[r[0]] = r.slice(1).map(cellVal);
+    }
+    return labelled ? { sizes: sizes, measures: measures } : null;
+  }
+
+  // Where two parsed charts give different figures for the same measurement at the same size.
+  function chartDiff(a, b) {
+    const out = [];
+    if (!a || !b) return out;
+    const keyOf = (s) => String(s).toLowerCase().replace(/\s+/g, ' ').trim();
+    const bKeys = {};
+    for (const k of Object.keys(b.measures)) bKeys[keyOf(k)] = k;
+    for (const k of Object.keys(a.measures)) {
+      const bk = bKeys[keyOf(k)];
+      if (!bk) continue;
+      for (let i = 0; i < a.sizes.length; i++) {
+        const j = b.sizes.findIndex((s) => keyOf(s) === keyOf(a.sizes[i]));
+        if (j === -1) continue;
+        const x = cellNums(a.measures[k][i]), y = cellNums(b.measures[bk][j]);
+        if (!x.length || !y.length) continue;
+        if (x.length !== y.length || x.some((v, n) => Math.abs(v - y[n]) > 0.05)) {
+          out.push(k + ' at ' + a.sizes[i] + ': ' + x.join('-') + ' vs ' + y.join('-'));
+          if (out.length >= 4) return out;
+        }
+      }
+    }
+    return out;
+  }
+
+  // A+ image URLs carry a crop suffix (".__CR0,0,1464,600_PT0_SX1464_V1___.jpg") that trims the
+  // asset to the module's aspect ratio, which can cut the bottom rows off a chart. Stripping it
+  // yields the full upload. Verified 2026-09-03: the stripped URL renders.
+  const fullImage = (url) => (url ? String(url).replace(/\.__[^/]*?___\./, '.') : null);
+
+  const imgUrl = (img) => {
+    if (!img) return null;
+    const u = img.getAttribute('data-src') || img.getAttribute('data-old-hires') || img.getAttribute('src') || '';
+    return /^https?:/.test(u) && !/\.gif(\?|$)/i.test(u) && !/grey-pixel|transparent-pixel/i.test(u) ? u : null;
+  };
+
+  const gridOf = (table) => [...table.rows].slice(0, 16).map((r) => [...r.cells].slice(0, 12).map((c) => txtOf(c)));
+
+  function charts() {
+    const S = SEL.charts;
+    const cands = [];
+    // Candidates are NOT passed through compact(): it drops nulls from arrays, and an empty cell
+    // in a measures row must stay in place or every figure after it shifts one size to the left.
+    for (const div of pickAll(S.widget).slice(0, 6)) {
+      const label = clip(pickText(S.widgetLabel, div), 60);
+      for (const t of pickAll(S.widgetTable, div).slice(0, 2)) {
+        const parsed = chartFromGrid(gridOf(t));
+        const cand = { source: 'amazon-size-chart' };
+        if (label) cand.label = label;
+        cands.push(Object.assign(cand, parsed || { unparsed: true }));
+      }
+    }
+    // Every candidate container, not just the first that matches: these are disjoint page
+    // regions rather than nested wrappers around one row, and a table is counted once.
+    const seenTables = new Set();
+    for (const c of S.table) {
+      for (const t of $$(c).slice(0, 6)) {
+        if (seenTables.has(t) || t.closest('[id^="fit-sizechartv2-"]')) continue;
+        seenTables.add(t);
+        const parsed = chartFromGrid(gridOf(t));
+        if (parsed) {
+          cands.push(Object.assign({ source: t.closest('#productDescription') ? 'description-table' : 'aplus-table' }, parsed));
+        }
+      }
+    }
+    const seenUrls = new Set();
+    for (const m of pickAll(S.aplusModule)) {
+      const head = pickText(S.aplusHeading, m);
+      if (!head || !SIZE_HEADING_RE.test(head)) continue;
+      for (const img of $$('img', m).slice(0, 3)) {
+        const url = imgUrl(img);
+        if (!url || seenUrls.has(url)) continue;
+        seenUrls.add(url);
+        cands.push({ source: 'aplus-image', heading: clip(head, 80), url: fullImage(url) });
+      }
+    }
+    for (const img of pickAll(S.sizeImg)) {
+      const url = imgUrl(img);
+      if (!url || seenUrls.has(url)) continue;
+      seenUrls.add(url);
+      const cand = { source: 'image', url: fullImage(url) };
+      const alt = clip(img.getAttribute('alt'), 60);
+      if (alt) cand.alt = alt;
+      cands.push(cand);
+    }
+    if (!cands.length) return null;
+
+    const parsed = cands.filter((c) => c.measures);
+    const images = cands.filter((c) => c.url);
+    const out = { count: cands.length, candidates: cands };
+
+    if (cands.length > 1) {
+      out._warn = cands.length + ' size-chart candidates on this page (' + parsed.length
+        + ' readable table(s), ' + images.length + ' image(s)). Amazon renders its size-chart widget '
+        + 'from brand-level data that can belong to a DIFFERENT garment in the same line'
+        + (images.length ? ', and an image cannot be read from markup' : '')
+        + '. Do not quote a figure from one candidate until the others are checked'
+        + (images.length ? ' — for an image, navigate to its url and take a screenshot.' : '.');
+    } else if (images.length) {
+      out._warn = 'The only size chart on this page is an image; nothing in the markup states its '
+        + 'figures. Navigate to its url and take a screenshot before quoting a size.';
+    }
+
+    const diffs = [];
+    for (let i = 0; i < parsed.length; i++) {
+      for (let j = i + 1; j < parsed.length; j++) {
+        const d = chartDiff(parsed[i], parsed[j]);
+        if (d.length) {
+          diffs.push('"' + (parsed[i].label || parsed[i].source) + '" vs "'
+            + (parsed[j].label || parsed[j].source) + '": ' + d.join('; '));
+        }
+      }
+    }
+    if (diffs.length) out._disagree = 'Readable charts disagree — ' + diffs.slice(0, 3).join(' | ');
+
+    // Which widget chart is THIS variant's. The labels name a fit ("US 4 Pockets 28" Inseam") and
+    // the twister names the selected fit, so the two can be matched without reading anything.
+    const widget = cands.filter((c) => c.source === 'amazon-size-chart');
+    if (widget.length > 1) {
+      const v = variants();
+      const sel = (v && v.selected) || null;
+      const values = sel ? Object.keys(sel).filter((k) => k !== 'asin')
+        .map((k) => String(sel[k])).filter((s) => s.length >= 3) : [];
+      if (values.length) {
+        const hits = widget.filter((c) => c.label
+          && values.some((s) => c.label.toLowerCase().indexOf(s.toLowerCase()) !== -1));
+        for (const c of hits) c.matchesSelected = true;
+        out._selectedCheck = hits.length
+          ? 'Chart label(s) matching the selected variant (' + values.join(' / ') + '): '
+            + hits.map((c) => '"' + c.label + '"').join(', ') + '. The other ' + (widget.length - hits.length)
+            + ' belong to sibling variants — a sweep that stops at the first table returns one of those.'
+          : 'None of the ' + widget.length + ' chart labels matches the selected variant ('
+            + values.join(' / ') + '). The chart for this SKU may not be on the page at all.';
+      }
+    }
+    // A widget label naming a garment the title does not: "US CAPRI LEGGINGS" on a listing whose
+    // title says "Leggings" and whose specs say "Long Length" was the whole 20.1" versus 27.4" error.
+    const title = (pickText(SEL.product.title) || '').toLowerCase();
+    const stray = [];
+    for (const c of widget) {
+      for (const w of String(c.label || '').split(/[^A-Za-z']+/)) {
+        if (w.length >= 4 && !LABEL_NOISE_RE.test(w) && title && title.indexOf(w.toLowerCase()) === -1
+            && stray.indexOf(w) === -1) stray.push(w);
+      }
+    }
+    if (stray.length && title) {
+      out._labelCheck = 'The widget chart label(s) mention ' + stray.map((w) => '"' + w + '"').join(', ')
+        + ', which the product title does not. The chart may be for a different garment in this '
+        + 'brand\'s line — confirm the inseam/length row against the listing before quoting it.';
+    }
+    return out;
+  }
+
   /* ------------------------------------------------------------------ full */
 
   async function full(opts) {
@@ -1024,7 +1341,11 @@
     const meta = page();
     if (meta.blocked) {
       return Object.assign({}, meta, {
-        error: 'page is behind a ' + meta.blocked + ' wall — a human needs to clear it in this browser',
+        error: meta.blocked === 'signin'
+          ? 'Amazon redirected to sign-in: this browser is signed out and the page asked for a session. '
+            + 'Do not sign in. The product page carries the review sample and histogram — use '
+            + 'full({reviews: true}) there instead.'
+          : 'page is behind a ' + meta.blocked + ' wall — a human needs to clear it in this browser',
       });
     }
     const out = Object.assign({}, meta, { _v: VERSION });
@@ -1040,6 +1361,24 @@
         // page, and it costs nothing to say so when it applies.
         const v = variants();
         if (v) out.variants = v;
+        // Size charts, when the page has any. Null on most of the catalogue, so it costs nothing
+        // there; on apparel it is the difference between a capri's inseam and the garment's.
+        const ch = charts();
+        if (ch) out.charts = ch;
+        // The review sample lives on the product page too, and for a signed-out browser this is
+        // the ONLY place it lives — /product-reviews/ redirects to sign-in (verified 2026-09-03).
+        // Opt-in, because eight review bodies are the largest thing in the capture.
+        if (opts.reviews) {
+          out.reviews = reviewsOn(document, opts);
+          const first = out.product.specs && out.product.specs['Date First Available'];
+          const earliest = out.reviews.sampling && out.reviews.sampling.earliest;
+          if (first && earliest && Date.parse(earliest) < Date.parse(first) - 30 * 86400000) {
+            out.reviews._dateWarn = 'The earliest sampled review (' + earliest + ') predates this '
+              + 'listing\'s "Date First Available" (' + first + ') by more than a month. Reviews may '
+              + 'have been carried over from a different product — read them for a mismatch in what '
+              + 'is being described.';
+          }
+        }
       } else if (meta.type === 'search') {
         out.search = searchResults(opts);
       } else if (meta.type === 'buyagain') {
@@ -1054,7 +1393,7 @@
     }
     // Same envelope fix as the eBay half: product()._missing used to sit only at
     // out.product._missing, so a caller checking out._missing saw nothing on a holed record.
-    return hoist(out, ['product', 'search', 'reviews', 'buyAgain', 'offers', 'variants']);
+    return hoist(out, ['product', 'search', 'reviews', 'buyAgain', 'offers', 'variants', 'charts']);
   }
 
   /* ---------------------------------------------------------------- health */
@@ -1063,16 +1402,22 @@
   // it distinguishes "Amazon changed the DOM" from "this product genuinely has no coupon".
   function health() {
     const t = pageType();
-    const groups = t === 'product' ? { product: SEL.product }
+    const groups = t === 'product' ? { product: SEL.product, charts: SEL.charts }
       : t === 'search' ? { search: SEL.search }
       : t === 'reviews' ? { reviews: SEL.reviews }
       : t === 'buyagain' ? { buyagain: SEL.buyagain }
       : { product: SEL.product, search: SEL.search };
+    // The review sample and histogram render on the product page as well, and for a signed-out
+    // browser that is the only place they render. Check them there whenever the page says it has
+    // ratings: a histogram that does not resolve on a rated product is a rotted selector, which is
+    // exactly the failure that went unreported through 0.6.0 because this loop never looked.
+    if (t === 'product' && pick(SEL.reviews.ratingsTotal)) groups.reviews = SEL.reviews;
     const report = { version: VERSION, pageType: t, url: location.href.split('?')[0],
                      ok: [], absent: [], broken: [] };
     for (const gname of Object.keys(groups)) {
       const g = groups[gname];
       for (const field of Object.keys(g)) {
+        if (SCOPED.has(field)) continue;
         const cands = g[field];
         const idx = cands.findIndex((c) => $(c));
         const name = gname + '.' + field;
@@ -1107,6 +1452,8 @@
     buyAgain: buyAgain,
     offers: offers,
     variants: variants,
+    charts: charts,
+    histogram: histogram,
     full: full,
     health: health,
     text: text,
@@ -1114,7 +1461,8 @@
     // Exposed for tests/parse.test.js, which runs this file under node with a stub window.
     // Not part of the caller-facing surface — do not build on it.
     _internals: { clean, clip, money, num, currency, compact, asinFrom, txtOf, unitPrice,
-                  pickAll, hoist, couponInfo, condition, purchaseMode },
+                  pickAll, hoist, couponInfo, condition, purchaseMode,
+                  chartFromGrid, chartDiff, cellVal, fullImage },
   };
   Object.defineProperty(window, '__amzx', { value: API, writable: true, configurable: true });
   }

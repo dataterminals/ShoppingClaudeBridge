@@ -32,12 +32,18 @@ changed when sorted by `total` instead of `price` (a re-measure on another query
 both are snapshots, the magnitude is the durable claim). Do not "harmonise" the two record shapes; an
 eBay record that looks like an Amazon one is actively misleading.
 
+One divergence is documented rather than fixed: search rows sit under `search.results` on Amazon
+and `search.rows` on eBay. Aliasing would duplicate the largest array in the capture, so both
+references say it at the top instead — it cost a cross-market session two round trips and one
+moment of believing a 300-result query had returned nothing.
+
 ## How to use it in a session
 
 ```js
 // after navigating the tab to an amazon.com URL
 await __amzx.full()                 // search / product / reviews / buyagain — dispatches on page type
 await __amzx.full({limit: 40})      // search page, more rows (default 24)
+await __amzx.full({reviews: true})  // product page: + the 8-review sample WITH text, and the date check
 __amzx.health()                     // which selectors still resolve here
 
 // after navigating to an ebay.com URL
@@ -193,6 +199,21 @@ broken selector than a genuinely sparse product.
     at the envelope in `hoist()` rather than by asking readers to remember nested keys; the nested
     copies stay put, so it is an index, not a move.
 
+12. **A picture reaches the caller by screenshot, and by nothing else.** `charts()` and
+    `item().images` hand over URLs; the caller navigates a tab there and takes a `computer`
+    screenshot. Verified 2026-09-03 in the app browser: a 1464×600 A+ size chart was legible at
+    half scale. `upload_image` is the wrong direction — it pushes a captured screenshot *into* a
+    page's file input. Image bytes cannot come back through `javascript_tool`, and a cloud
+    container's egress refuses `i.ebayimg.com`. The Chrome-extension screenshot timed out at 30 s,
+    twice, on one machine that day; when it does, the skill says so and stops rather than looping.
+
+13. **When the extractor cannot see something, the return value says so.** That is the
+    through-line of the 2026-09-03 notes and it is now the design rule: `_dilution`, the eBay ad
+    `_warn`, `charts()._warn`, `_silhouetteWarn`, `_emptyWarn`, `_histWarn` and `blocked: "signin"`
+    are all the same shape — a known blind spot named in the record rather than the visible part
+    returned as though it were the whole answer. A new extractor that returns the part it can see
+    and stays quiet about the rest is the bug this repo keeps re-fixing.
+
 ## There are TWO skill files and they are meant to differ
 
 | | Where | What it is |
@@ -248,7 +269,7 @@ between the two: a human decides which changes are generic and which are persona
 ### Building the bundle to hand to Cowork
 
 ```bash
-node bin/package.js            # -> amazon-claude-bridge.plugin in the repo root (gitignored)
+node bin/package.js            # -> shopping-claude-bridge.plugin in the repo root (gitignored)
 node bin/package.js --list     # what would go in, without writing
 ```
 
@@ -341,8 +362,54 @@ Three rules:
   v0.4.1 by narrowing the fallback to a `>` chain that cannot enter that wrapper. The invariant
   worth remembering is cheap to check and was never checked: **`was` must exceed `price`.**
 
+- **Amazon renamed the review text hooks, and the four that survived hid it.** Verified
+  2026-09-03: `review-title` and `review-body` matched 0 of 8 cards, `reviewTitle` and
+  `reviewText` matched 8 of 8, while the stars, date, badge and helpful hooks kept their names.
+  So through 0.6.0 the sample arrived as `{stars, date, verified, helpful}` — four real fields and
+  no prose, a record that was 90% hole and read as complete. The body lives in
+  `reviewRichContentContainer`; `reviewText` itself opens with two screen-reader hints and closes
+  with "Read more". `/product-reviews/` now redirects a signed-out browser to sign-in, so the
+  product page — 8 cards plus the histogram — is the route that works for everyone, and
+  `full({reviews: true})` reads it there.
+- **The histogram percentages moved into a content-hashed class**, `.histogram-column-space`
+  matched nothing, and the distribution came back empty on every product page with nothing
+  reporting it. Each row's `.a-meter` carries the figure as `aria-valuenow`, exactly five, 5-star
+  first (76/12/5/4/3 on a 4.5 listing). `histogram()` also checks that the five sum to roughly
+  100, because five wrong spans look exactly like five right ones. `health()` now checks the
+  reviews group on any product page that reports ratings; before 2026-09-03 it never looked,
+  which is why this rotted unreported.
+- **Amazon's size-chart widget is brand-level data and can be for a different garment.**
+  `#sizeChartV2Data_feature_div` is a preloaded popover with one `div#fit-sizechartv2-N` per chart
+  and an `<h5>` label above each table. On a full-length legging listing the single chart was
+  labelled "US CAPRI LEGGINGS" and read L inseam 20.1"; the A+ image for the garment on the page
+  read 27.4". On a three-fit listing the first chart in DOM order was the 25" fit, on the 28"
+  variant's own page. `charts()` enumerates rather than picks; the label is what makes
+  `_labelCheck` and `_selectedCheck` possible. A+ images carry `alt="1"` throughout, so the only
+  markup that identifies a size-chart image is its module's heading, and the crop suffix
+  (`.__CR0,0,1464,600_PT0_SX1464_V1___`) is stripped from the URL handed back so the whole upload
+  renders.
+
 ### eBay
 
+- **Silhouette specifics are dropdowns, and the warning is scoped to them.** A listing carried
+  `Inseam: 28.5 in`, `Rise: High`, `Waist Size: 30 in` — all right — and `Style: Ankle` on a
+  garment the photographs show to be a flare. `_silhouetteWarn` fires on `Style` / `Leg Style` /
+  `Silhouette` / `Fit` only; adding the measurements to `SILHOUETTE_RE` recreates the always-on
+  warning nobody reads.
+- **A facet filter can render zero rows against a positive count, with no error.** Seen live
+  2026-09-03 with `&Size=L&Color=Black%7CGray` on a 300-result query. `_emptyWarn` detects
+  `rows.length === 0` and names the filter parameters; `appliedFilters` reads the page's own
+  chips, and eBay serves two layouts of those for the same URL, minutes apart — separate
+  `.srp-multi-aspect__item--applied` items, or a collapsed "3 filters applied" flyout of
+  `…__item--overflow` entries — so the extractor keys on the "Remove filter" affordance each
+  applied aspect carries rather than on either container. The same URL rendered 64 rows on
+  another machine the same day, so the zero-row failure is intermittent, not a fixed property of
+  those parameters.
+- **eBay captions the first photo.** The first `.ux-image-carousel-item img` carries a
+  machine-written description as its alt ("Black high-waisted women's leggings with front and
+  side cargo pockets, hanging on a white plastic hanger."); the rest are "<title> - Picture N of 9".
+  It is the cheapest path from a picture to the caller, and `item().images.description` carries
+  it. `s-l500` → `s-l1600` in the URL is the full-size rendition (verified: renders).
 - **Sponsored detection is unsolved, and `__ebayx` deliberately does not attempt it.** Probed
   2026-08-27 across a 70-card search: the reversed literal `derosnopS` matched **70 of 70** cards,
   forward `/Sponsored/i` matched **0**, and `[class*=sponsored]` / `[aria-label*=Sponsored]`

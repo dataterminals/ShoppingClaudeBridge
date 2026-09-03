@@ -10,6 +10,9 @@ await __ebayx.full({limit: 40})      // search page, more rows (default 24)
 __ebayx.health()                     // which selectors still resolve, plus the variant map
 ```
 
+Search rows are under **`search.rows`** here and **`search.results`** on Amazon. Same idea,
+different key; reading the wrong one looks like an empty search, and did, once.
+
 ## Two shapes of blank you should know about
 
 **`condition` usually arrives via item specifics, not its own field.** On pre-owned listings eBay
@@ -99,6 +102,14 @@ Only `_nkw`, `_sop=12` and `_sop=15` were exercised directly; the rest are conve
 as Amazon's `rh` nodes: if a filtered search returns zero or nonsense, **drop the filter and filter
 in your own analysis** rather than retrying parameter guesses.
 
+That failure is now detected rather than left to memory. On 2026-09-03 `&Size=L&Color=Black%7CGray`
+on a 300-result query rendered **0 rows** with no error and no warning. `search()` reports
+`filterParams` (the narrowing parameters on the URL), `appliedFilters` (what the page's own chips
+say is applied, in either of the two layouts eBay serves), and **`_emptyWarn`** when there are no rows — naming the count and the filters, or
+pointing at `health()` when the URL carried none. The same URL rendered 64 rows on another machine
+the same day: intermittent, not a property of those parameters, so one unfiltered re-run is the
+right response and a retry loop is not.
+
 Item pages: `https://www.ebay.com/itm/<itemId>`.
 
 ## Ads are NOT filtered, and you must not imply otherwise
@@ -179,6 +190,15 @@ Vans men's 8 is women's **9.5**. The seller did the conversion by hand and got i
 size. `item().specifics` surfaces both so you can catch it; a report built off the title ships the
 error downstream.
 
+**But a form has two kinds of field, and they fail differently.** A typed measurement (`Inseam:
+28.5 in`, `Waist Size: 30 in`, `Rise`) is a claim about a tape measure. `Style`, `Leg Style`,
+`Silhouette` and `Fit` are dropdowns the seller clicked past on the way to listing. Verified
+2026-09-03 on a listing whose form was unusually complete and ranked second on the strength of it:
+every measurement was right, and `Style: Ankle` was a flare, visible in the photographs. `item()`
+sets **`_silhouetteWarn`** naming the field and value whenever one of those keys is present, and
+stays silent on the measurements. When it fires, the photograph is the check — `images.description`
+is eBay's caption of the first photo, `images.url` the photo to screenshot.
+
 `styleCode` reads `Style Code`, then `MPN`, then `Model` — **in that order, and the order is the
 whole point.** Until 0.3.0 it checked `Model` first, which is a model-*family* name shared by every
 colorway: item 186246168843 carries `Model: "Sk8-Hi Mte-1"` and `Style Code: "VN0A5HZYY49"`, and
@@ -202,3 +222,10 @@ price history that Amazon does not have — but do not imply you checked it.
 
 **Seller tenure and items-sold** are not in `seller`. They live further down the item page in the
 About-this-seller block and would cost a navigation.
+
+**What the photographs show.** `item().images` is as far as markup goes: `count`, the first photo's
+full-size `url` (`s-l1600`), and `description` — eBay's own machine-written caption of the first
+photo ("Black high-waisted women's leggings with front and side cargo pockets, hanging on a white
+plastic hanger."). The caption is real signal and free; it will not always name a silhouette. To
+see the picture, navigate a tab to `url` and take a screenshot — the route, and the three routes
+that do not work, are in SKILL.md under *Seeing a picture*.

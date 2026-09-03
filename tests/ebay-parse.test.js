@@ -20,7 +20,9 @@ const vm = require('vm');
 
 const SRC = path.join(__dirname, '..', 'src', 'ebay-claude-bridge.user.js');
 
-const sandbox = { window: {}, console };
+// URLSearchParams is a browser global the library uses to read the query string; a fresh vm
+// context does not inherit node's copy, so lend it one.
+const sandbox = { window: {}, console, URLSearchParams };
 vm.createContext(sandbox);
 vm.runInContext(fs.readFileSync(SRC, 'utf8'), sandbox, { filename: SRC });
 
@@ -30,7 +32,7 @@ if (!ebayx) {
   process.exit(1);
 }
 const { itemIdFrom, spans, deA11y, shippingInfo, returnsInfo, discountInfo,
-        conditionGrade, money, num } = ebayx._internals;
+        conditionGrade, money, num, searchFilterParams, SILHOUETTE_RE } = ebayx._internals;
 
 let passed = 0;
 const failures = [];
@@ -168,6 +170,36 @@ eq('grade from a new-with-box listing',
 eq('grade with no essay attached', conditionGrade('Pre-Owned'), 'Pre-Owned');
 eq('grade on empty', conditionGrade(''), null);
 eq('grade on null', conditionGrade(null), null);
+
+/* ------------------------------------------------- searchFilterParams()
+ * A facet-filtered search can render 0 rows against a positive result count with no error —
+ * seen live on 2026-09-03 with &Size=L&Color=Black%7CGray on a 300-result query. The library
+ * warns when that happens, and the warning has to name which parameters were the filters.
+ */
+
+eq('aspect facets are filters',
+   searchFilterParams('?_nkw=cargo+leggings&_sop=15&Size=L&Color=Black%7CGray'),
+   ['Size=L', 'Color=Black|Gray']);
+eq('eBay-native filters count too',
+   searchFilterParams('?_nkw=x&LH_BIN=1&LH_ItemCondition=1000&_udlo=25'),
+   ['LH_BIN=1', 'LH_ItemCondition=1000', '_udlo=25']);
+eq('shape-only params are not filters',
+   searchFilterParams('?_nkw=x&_sop=15&_pgn=2&rt=nc&_from=R40&_trksid=abc&_sacat=0'), []);
+eq('empty query', searchFilterParams(''), []);
+eq('null query', searchFilterParams(null), []);
+
+/* ------------------------------------------------------- SILHOUETTE_RE
+ * Style: Ankle on a listing whose photographs show a flare (2026-09-03). The typed fields on the
+ * same form — Inseam 28.5 in, Rise, Waist Size — were right. The warning fires on the menu fields
+ * and stays silent on the measurements, or it becomes the always-on kind nobody reads.
+ */
+
+for (const k of ['Style', 'Leg Style', 'Silhouette', 'Fit', 'style']) {
+  eq('silhouette key ' + k + ' is flagged', SILHOUETTE_RE.test(k), true);
+}
+for (const k of ['Inseam', 'Rise', 'Waist Size', 'Size', 'Size Type', 'Type', 'Style Code', 'Fit Type']) {
+  eq('key ' + k + ' is not flagged', SILHOUETTE_RE.test(k), false);
+}
 
 /* ------------------------------------------------------------- API surface */
 

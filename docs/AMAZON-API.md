@@ -3,6 +3,18 @@
 Every call is synchronous except `full()`. (`criticalReviews()` was removed in v0.2.0 and
 `offers()` has been synchronous since the fetch path went with it.)
 
+**0.7.0 (2026-09-03) is about the things the extractor could not see and did not say so.**
+Review text was silently absent after Amazon renamed two hooks; the star histogram was silently
+empty after a class became content-hashed; size charts were a table sweep that returned the wrong
+garment's chart with nothing marking it. Now: `reviews()` carries `title`, `body` and `format`
+again, `product.rating.distribution` arrives with every product capture, `charts()` enumerates
+every size-chart candidate and warns when they disagree, `full({reviews: true})` reads the sample on
+the product page (the reviews page redirects a signed-out browser to sign-in), and `health()`
+checks the review selectors on any product page that reports ratings.
+
+**Search rows live under `search.results` here and `search.rows` on eBay.** Different keys, same
+idea. Reading the wrong one looks like an empty search.
+
 **Search-row `title` is composed from two elements as of 0.6.0.** On current footwear cards Amazon
 puts the brand in the `h2` and the product name in a sibling anchor, so the old selector returned
 `"Vans"` for 44 of 47 rows. `title` now recombines brand and name, skipping the prefix when the
@@ -78,7 +90,8 @@ anything else (`Best Seller`, `Amazon's Choice`) stays in `badge`.
     "title": "...",
     "brand": "Anker",
     "price": { "current": 9.99, "currency": "USD", "unit": "$0.83 / feet" },
-    "rating": { "stars": 4.7, "count": 147109 },
+    "rating": { "stars": 4.7, "count": 147109,
+                "distribution": { "5star": 76, "4star": 12, "3star": 5, "2star": 4, "1star": 3 } },
     "availability": "In Stock",
     "shipsFrom": "Amazon",
     "soldBy": "AnkerDirect",
@@ -239,22 +252,101 @@ decode is **self-validating**: map keys are underscore-joined value indices matc
 positionally, and `selected` is found by locating the current page's own ASIN in the map. If
 `selected` is null on a variation page, the convention has moved and `_warn` says so.
 
-### Reviews are capped at 8, and every parameter is ignored
+### Size charts — `charts()`
+
+Included in `full()` on every product page; `null`, and therefore absent, on most of the
+catalogue. On apparel it is the difference between a capri's inseam and the garment's.
+
+```jsonc
+"charts": {
+  "count": 2,
+  "candidates": [
+    { "source": "amazon-size-chart", "label": "US CAPRI LEGGINGS",
+      "sizes": ["XS", "S", "M", "L", "XL", "XXL"],
+      "measures": { "US Size":    ["0-2", "4-6", "8-10", "12-14", "16-18", "20-22"],
+                    "Waist (in)": ["24 - 26", "26 - 28", "28 - 30", "30 - 32", "32 - 34", "35 - 37"],
+                    "Inseam (in)": [19.7, 19.7, 19.7, 20.1, 20.5, 21.3] } },
+    { "source": "aplus-image", "heading": "Get the Right Size for Maximum Performance",
+      "url": "https://m.media-amazon.com/images/S/aplus-media-library-service-media/….jpg" }
+  ],
+  "_warn": "2 size-chart candidates on this page (1 readable table(s), 1 image(s)). Amazon renders its size-chart widget from brand-level data that can belong to a DIFFERENT garment in the same line, and an image cannot be read from markup. …",
+  "_labelCheck": "The widget chart label(s) mention \"CAPRI\", which the product title does not. …"
+}
+```
+
+Real capture, 2026-09-03, on a full-length legging listing. The HTML chart says L inseam 20.1";
+the image says 27.4". Amazon's widget (`#sizeChartV2Data_feature_div`, a preloaded popover with
+one `div#fit-sizechartv2-N` per chart and an `<h5>` label above each table) is brand-level data,
+and the brand's capri chart had been attached to a full-length garment. A table sweep that stops
+at the first chart has a coin-flip chance of being wrong and no signal that it flipped. On a
+second listing, with three widget charts for three fit types, the first in DOM order was the 25"
+fit on the 28" variant's own page.
+
+`charts()` does not pick. It enumerates: the widget's charts with their labels, seller-written
+tables under A+ content or the description that pass the size-chart heuristic, images inside A+
+modules whose heading mentions size (A+ images carry `alt="1"` throughout, so the heading is the
+only marker), and any image with a size-chart `alt`. Then it says what it knows:
+
+| Field | When | Says |
+|---|---|---|
+| `_warn` | more than one candidate, or an image-only chart | do not quote a figure until the others are checked; screenshot the image |
+| `_disagree` | two readable charts differ | which measurement, at which size, by how much: `Inseam (in) at L: 26.6 vs 28.7` |
+| `_selectedCheck` | several widget charts and a twister selection | which chart's label matches the selected variant (`matchesSelected: true` on it), and how many belong to siblings |
+| `_labelCheck` | a widget label names a garment the title does not | `"CAPRI"` on a listing titled "Leggings" |
+
+`measures` rows are aligned to `sizes`: a lone figure is a number, a range stays a string, an
+empty cell is `null` and holds its place. Sizes are read down the first column (Amazon's widget)
+or across the header (seller tables), and the grid is transposed so the shape is always the same.
+
+An image candidate carries no figures and never will. Its `url` has the A+ crop suffix stripped,
+so it is the full upload; navigate a tab there and take a screenshot — the route is in the skill.
+
+### Reviews: eight, unsteerable, and with their text back
 
 Verified 2026-08-21 on `B0BV9YJ7LS`: `filterByStar=one_star` returns eight reviews rated
 5,5,5,5,4,5,5,5. The same eight come back for `two_star`, `three_star`, `critical`, both `sortBy`
 values and `pageNumber=2`. There is no pagination control. This is site-wide — `B0BGKYF5VZ` served
-224 reviews under its 1★ filter on 18 Aug and eight on 20 Aug.
+224 reviews under its 1★ filter on 18 Aug and eight on 20 Aug. `criticalReviews()` was removed in
+v0.2.0 rather than left to mislead.
 
-`criticalReviews()` was removed in v0.2.0 rather than left to mislead. `reviews()` now returns:
+**Two things changed on 2026-09-03.** Amazon renamed the title and body hooks (`review-title` →
+`reviewTitle`, `review-body` → `reviewText`) while the stars, date, badge and helpful hooks kept
+their names, so through 0.6.0 every review in the sample arrived as `{stars, date, verified,
+helpful}` with no prose — a record that was 90% hole and read as complete. And `/product-reviews/`
+now redirects a signed-out browser to sign-in (`full()` returns `{blocked: "signin"}` there). The
+product page carries the same sample and the histogram for everyone, so read them there:
 
-```jsonc
-"sampling": { "n": 8, "ratingsTotal": 574, "coverage": "1.4%", "ceiling": true, "complete": false }
+```js
+await __amzx.full({reviews: true})                    // product page: + reviews, with text
+await __amzx.full({reviews: true, bodyChars: 800})    // longer bodies (default 400)
 ```
 
-and sets `_warn` naming any parameter proven ignored. **The star distribution is the only
-trustworthy figure the endpoint still returns** — on that listing it reports 3% at 1★, roughly 17
-reviews that the "one star" filter will not show you.
+```jsonc
+"reviews": {
+  "distribution": { "5star": 76, "4star": 12, "3star": 5, "2star": 4, "1star": 3 },
+  "sampling": { "n": 8, "ratingsTotal": 132, "coverage": "6.1%",
+                "earliest": "2025-11-02", "latest": "2026-01-19", "ceiling": true, "complete": false },
+  "sample": [
+    { "stars": 5, "title": "Love them!", "date": "the United States on January 19, 2026",
+      "format": "Size: XX-Large | Color: Black", "verified": true,
+      "body": "These leggings are true to size and I love that they actually reach my ankles…" }
+  ],
+  "_warn": "Only 8 of 132 reviews are reachable and there is no way to page further …"
+}
+```
+
+`format` is the variant a review is about, and on a multi-fit listing it is the only thing on the
+page that says so: on an 879-rating child every sampled review carried `Fit Type: 4 Pockets 28"
+Inseam`, which confirmed a split rating pool independently of `_dilutionCheck`.
+
+`sampling.earliest` / `latest` bracket the sample's dates. When the specs carry `Date First
+Available` and the earliest review predates it by more than a month, `_dateWarn` says so —
+reviews from 2020 on a 2025 ASIN describe some other product, and stars alone cannot show it.
+
+**The star distribution is the only trustworthy aggregate**, and it now arrives with every
+product capture as `product.rating.distribution` (percent per star, 5-star first). It is read from
+each histogram row's `aria-valuenow`, the five figures are checked to sum to roughly 100, and
+`_histWarn` fires when they do not, because five wrong spans look exactly like five right ones.
 
 ## `health()` → object
 
@@ -273,6 +365,11 @@ Anything in `broken` means Amazon moved something and `SEL` needs a new candidat
 `(fallback #N)` means the primary selector stopped matching and a backup carried it — an early
 warning that the primary is rotting.
 
+On a product page that reports ratings it also checks the `reviews` group (cards, title, body,
+histogram), because that is where those render and, through 0.6.0, nothing ever looked — which is
+how the histogram rotted unreported. The `charts` group is checked on every product page and is
+all-optional: most of the catalogue has no size chart.
+
 ## Narrower calls
 
 | Call | Returns |
@@ -280,7 +377,9 @@ warning that the primary is rotting.
 | `page()` | Page type, canonical URL, ASIN, timestamp, `blocked` state |
 | `product()` | Product record only |
 | `search(opts?)` | Search record only |
-| `reviews(doc?, opts?)` | Star distribution + review sample from a document |
+| `reviews(doc?, opts?)` | Star distribution + review sample (title, body, format, dates) from a document — the product page works |
+| `charts()` | Every size-chart candidate on the page, parsed where possible, with the disagreement and label checks |
+| `histogram(doc?)` | `{distribution}` from the star histogram, with a `_warn` when the five figures cannot be the five rows |
 | `offers()` | All sellers on the current page, or `{_needs}` if the panel isn't loaded |
 | `variants(opts?)` | Every SKU in the listing, what's actually stocked, and `_dilution`. `{full:true}` for the whole decoded list |
 | `text(max?)` | Rough visible text. Escape hatch for page types with no extractor (cart, wishlists) |
@@ -292,6 +391,8 @@ warning that the primary is rotting.
 |---|---|
 | `__amzx is not defined` | Script not installed, or a `GM_*` grant was added and moved it into Tampermonkey's sandbox |
 | `{blocked: "captcha"}` | Robot wall. A human must clear it in this browser |
+| `{blocked: "signin"}` | The page asked for a session — `/product-reviews/` does this to a signed-out browser. Do not sign in; use `full({reviews: true})` on the product page |
+| Review sample has stars and dates but no text | The title/body hooks moved again. Through 0.6.0 this was the shipped state; run `health()` on the product page and look for `reviews.rTitle` / `reviews.rBody` |
 | Record present but `_missing` lists most fields | Page still rendering, or a real DOM change — run `health()` |
 | `sponsoredRemoved` unusually high | Possible false positives in ad detection, which silently hides real products |
 | Review count ~100× too low | Abbreviated form (`"22.2K"`) reaching a parser that strips non-digits. Fixed in 0.1.0; check `num()` if it returns |

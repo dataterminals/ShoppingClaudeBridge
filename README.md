@@ -54,7 +54,8 @@ An eBay record that looked like an Amazon one would be actively misleading, so i
 | Search results | `__amzx.full()` | Organic results only — ASIN, title, price, stars, review count, Prime, badge — plus how many ads were removed |
 | Product | `__amzx.full()` | Price (with unit price and list price), rating, availability, ships-from / sold-by, delivery, a parsed coupon (percentage split from the condition attached to it), badges, breadcrumb, feature bullets, spec table, canonical URL |
 | All sellers | navigate to `/dp/<ASIN>?aod=1`, then `__amzx.full()` | Every offer with price, seller, ships-from, validated condition and purchase mode. Worth doing: on the test product the buy box showed $9.99 while Amazon Resale had it at $9.89 |
-| Reviews | navigate to `/product-reviews/<ASIN>/`, then `__amzx.full()` | Star distribution, plus a capped sample with `coverage` and `ceiling` flags — Amazon now returns 8 reviews regardless of any filter |
+| Reviews | `__amzx.full({reviews: true})` on a product page | The star distribution (also on every product capture as `rating.distribution`), plus the capped sample **with title, body and the variant it was written about** — Amazon returns 8 reviews regardless of any filter, and the reviews page now redirects a signed-out browser to sign-in |
+| Size charts | `__amzx.full()` on a product page | Every size-chart candidate — Amazon's widget with its label, seller tables, A+ images — parsed where possible, with a warning when they disagree. On a real listing the HTML chart was a capri's (L inseam 20.1") and the garment's chart was an image reading 27.4" |
 | Variants | `__amzx.full()` on a product page | Every SKU in the listing, which combinations are actually stocked, and `_dilution` — how many products share the one star rating |
 | Buy Again | navigate to `/gp/buyagain`, then `__amzx.full()` | Every reorder card — ASIN, title, price, unit price, list price, promo, and the Subscribe & Save vs one-time offer pills. On a 24-card capture, 10 cards had a subscription price below the price printed on the card |
 
@@ -62,8 +63,8 @@ An eBay record that looked like an Amazon one would be actively misleading, so i
 
 | Page | Call | You get |
 |---|---|---|
-| Search results | `__ebayx.full()` | Per row: item id, title, condition, `sizeHint`, `{price, shipping, total}`, sale format, bids, watchers. **Ads are not filtered** — see below |
-| Item | `__ebayx.full()` | Price, discount, shipping (cost + origin), `total`, returns as a tri-state, seller as `{name, feedbackCount, positivePct}`, quantity available and sold, item specifics, and the style code |
+| Search results | `__ebayx.full()` | Per row: item id, title, condition, `sizeHint`, `{price, shipping, total}`, sale format, bids, watchers. **Ads are not filtered** — see below. A facet filter that renders zero rows against a positive count is reported as such, with the filters named |
+| Item | `__ebayx.full()` | Price, discount, shipping (cost + origin), `total`, returns as a tri-state, seller as `{name, feedbackCount, positivePct}`, quantity available and sold, item specifics, the style code, and the photos — count, full-size URL, and eBay's own caption of the first one. Silhouette specifics (`Style`, `Leg Style`) carry a warning: they are dropdowns, and one read "Ankle" on a flare |
 | Variants | `__ebayx.full()` on an item page | Every option per axis with its stock state, price and remaining quantity — from a static payload, with **no click and no request** |
 
 Anything: `health()` reports which selectors still resolve on the current page — see *Maintenance*.
@@ -138,7 +139,12 @@ site is the only reason that was caught:
   same eight come back for every other filter, both sorts and `pageNumber=2`. It is site-wide — one
   listing served 224 reviews under its 1★ filter on 18 Aug and eight on 20 Aug. `reviews()` reports
   `coverage` and `ceiling` so the gap is visible, and the star distribution is the only figure
-  still worth quoting.
+  still worth quoting. Since 2026-09-03 the reviews page also redirects a signed-out browser to
+  sign-in; the product page carries the same sample, and `full({reviews: true})` reads it there.
+- **Neither library can see a picture, and both now say where it is.** A size chart that lives in
+  an A+ image, or an eBay silhouette that only the photographs contradict, is handed over as a URL
+  to screenshot — with a warning in the record that a figure from the visible part is not the
+  whole answer.
 - **`WebFetch` on eBay returns confidently wrong content, not an error.** A fetch of an eBay search
   for Vans hi-tops came back as a clean, well-formed table of *Bobby Witt Jr. baseball cards* —
   plausible titles, plausible prices, plausible seller handles, entirely unrelated. Browser only.
@@ -220,8 +226,8 @@ node bin/skill-drift.js --check  # the two skill trees are in step
 
 | Suite | Covers |
 |---|---|
-| `parse` | 105 Amazon parser cases |
-| `ebay-parse` | 45 eBay parser cases |
+| `parse` | 129 Amazon parser cases |
+| `ebay-parse` | 68 eBay parser cases |
 | `orders` | 47 order-ingest cases |
 | `core-parity` | the shared util block is byte-identical across both userscripts |
 | `vendor` | each skill-injected copy matches its source and still evaluates |

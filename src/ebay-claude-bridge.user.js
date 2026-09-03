@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopping Claude Bridge — eBay
 // @namespace    https://github.com/dataterminals/ShoppingClaudeBridge
-// @version      0.3.0
+// @version      0.4.0
 // @description  Read-only extractor library for ebay.com. Exposes window.__ebayx so an assistant driving the browser can pull a compact JSON record of the current page instead of reading a 60 KB accessibility tree. Never clicks a control, submits a form, or reads credentials.
 // @author       dataterminals
 // @homepageURL  https://github.com/dataterminals/ShoppingClaudeBridge
@@ -52,7 +52,7 @@
 (function () {
   function __ebayxLib() {
   'use strict';
-  const VERSION = '0.3.0';
+  const VERSION = '0.4.0';
 
   // --8<-- shared core: START. Byte-identical across every *.user.js in src/.
   // Verify with `node tests/core-parity.test.js`. These markers are `//` on purpose:
@@ -279,6 +279,29 @@
                      text: clip(text, 60) });
   };
 
+  // Item-specifics keys that are a dropdown the seller clicked past, as opposed to a figure the
+  // seller typed. Verified 2026-09-03 on a leggings listing whose form was unusually complete:
+  // Inseam 28.5 in, Rise High, Waist Size 30 in — all fine — and Style: Ankle on a garment the
+  // photographs show to be a flare. The asymmetry is predictable: a typed inseam is a claim about
+  // a tape measure, a silhouette is a menu choice. Warn on the menu fields only; a warning that
+  // also fired on the measurements would be the always-on kind nobody reads.
+  const SILHOUETTE_RE = /^(style|leg style|silhouette|fit)$/i;
+
+  // Query parameters that NARROW a search, as distinct from the ones that only shape it. eBay's
+  // aspect facets are capitalised bare names (Size=L, Color=Black|Gray, "US Shoe Size=9"), and
+  // LH_* / _udlo / _udhi / _dcat are its own filters. _nkw, _sop, _pgn, and the tracking noise
+  // are not. A facet-filtered search can render ZERO rows against a positive result count with
+  // no error anywhere (seen live 2026-09-03), and the warning for that needs to name the culprits.
+  const SHAPE_PARAMS = /^(_nkw|_sop|_pgn|_from|_trksid|_sacat|_ipg|_odkw|_osacat|rt|_dmd|_fsrp|_sadis|_stpos|_fcid|_dkr|_ssn|_saslop|_oaa|mkcid|mkrid|campid|toolid|customid|mkevt|hash|_trkparms|siteid|ssPageName)$/i;
+  const searchFilterParams = (search) => {
+    const out = [];
+    for (const kv of new URLSearchParams(search || '')) {
+      if (!kv[0] || SHAPE_PARAMS.test(kv[0])) continue;
+      out.push(kv[0] + '=' + kv[1]);
+    }
+    return out;
+  };
+
   /* ------------------------------------------------------- selector registry */
   // Most-specific first, most-durable last. Same doctrine as the Amazon half: when a field
   // breaks, add a candidate HERE, never inline it into an extractor.
@@ -302,6 +325,11 @@
       sellerName: ['.x-sellercard-atf__info__about-seller a span',
                    '.x-sellercard-atf__info__about-seller'],
       quantity:   ['.x-quantity__availability', '.d-quantity__availability'],
+      // The photo carousel. The FIRST image's alt is a machine-written caption of the photo
+      // ("Black high-waisted women's leggings with front and side cargo pockets, hanging on a
+      // white plastic hanger."); the rest are "<title> - Picture N of 9". Verified 2026-09-03.
+      // Each photo renders twice (carousel plus grid), so images() counts distinct URLs.
+      images:     ['.ux-image-carousel-item img', '.ux-image-grid img', '[data-testid="ux-image-carousel"] img'],
       // Item specifics: the scope notes reported "no working structured selector" after trying
       // .ux-layout-section--features and .ux-layout-section-evo__row. Both are real classes and
       // both are wrong here — the first also matches the CONDITION section, and the second
@@ -332,6 +360,15 @@
       price:      ['.s-card__price', '.s-item__price'],
       attrRow:    ['.s-card__attribute-row', '.s-item__detail'],
       resultCount:['.srp-controls__count-heading', '.result-count__count-heading'],
+      // Applied aspects — what the PAGE says is applied, as distinct from what the URL asked for.
+      // eBay serves TWO layouts for the same URL (both seen 2026-09-03, minutes apart): separate
+      // chip items, or one "3 filters applied" flyout holding them as overflow items. In both, each
+      // applied aspect carries a "Remove filter" affordance and nothing else does, so that text is
+      // the marker and these candidates only narrow where to look.
+      applied:    ['.srp-multi-aspect__item--applied',
+                   '.srp-multi-aspect__flyout--applied .srp-multi-aspect__item--overflow',
+                   '.srp-multi-aspect__flyout--applied a',
+                   '[class*="aspect__item--applied"]'],
     },
   };
 
@@ -349,6 +386,8 @@
   const OPTIONAL = new Set([
     'discount', 'delivery', 'subtitle', 'attrRow', 'resultCount', 'specHeading',
     'quantity', 'condition', 'river',
+    // No chips on an unfiltered search; a listing can in principle have no photo.
+    'applied', 'images',
   ]);
 
   /* ------------------------------------------------------------- page type */
@@ -564,6 +603,29 @@
     });
   }
 
+  // The listing's photographs, as far as markup can take them. There is no path from a picture to
+  // the caller's eyes inside this library, so this hands over the two things that exist: eBay's own
+  // caption of the first photo, and the URL to screenshot. s-l500 is the carousel rendition;
+  // s-l1600 is the same asset at full size (verified 2026-09-03: renders).
+  function images() {
+    const els = pickAll(SEL.item.images);
+    if (!els.length) return null;
+    const urls = [];
+    let description = null;
+    for (const img of els) {
+      const u = img.getAttribute('data-src') || img.getAttribute('src') || '';
+      if (!/^https?:/.test(u)) continue;
+      const full = u.replace(/\/s-l\d+\./, '/s-l1600.');
+      if (urls.indexOf(full) === -1) urls.push(full);
+      const alt = clean(img.getAttribute('alt'));
+      if (!description && alt && alt.length > 30 && !/ - Picture \d+ of \d+$/i.test(alt)) {
+        description = clip(alt, 160);
+      }
+    }
+    if (!urls.length) return null;
+    return compact({ count: urls.length, url: urls[0], description: description });
+  }
+
   function item() {
     const S = SEL.item;
     const id = itemIdFrom(location.href);
@@ -606,11 +668,22 @@
       // colorway identifier and prescribe dedupe on (seller, styleCode, price), so the old order
       // would have collapsed three different colorways from one seller into a single row.
       styleCode: spec ? (spec['Style Code'] || spec.MPN || spec.Model || null) : undefined,
+      images: images(),
     }) || {};
 
     const want = ['title', 'price', 'condition', 'seller'];
     const missing = want.filter((k) => rec[k] == null);
     if (missing.length) rec._missing = missing;
+    // Silhouette fields are menu choices, not measurements — see SILHOUETTE_RE. Name the field
+    // and its value so the reader sees exactly which claim needs a photograph behind it.
+    const menuKeys = spec ? Object.keys(spec).filter((k) => SILHOUETTE_RE.test(k)) : [];
+    if (menuKeys.length) {
+      rec._silhouetteWarn = menuKeys.map((k) => 'specifics.' + k + ' = "' + spec[k] + '"').join(', ')
+        + ' — silhouette fields are seller-selected dropdowns and are frequently wrong (a listing '
+        + 'carrying Style: Ankle was a flare). Typed measurements on the same form (Inseam, Rise, '
+        + 'Waist Size) hold up better. Confirm the shape from the photographs: images.description is '
+        + 'eBay\'s caption of the first photo, images.url the photo to screenshot.';
+    }
     if (ship && ship.cost == null) {
       rec._warn = 'Shipping cost did not parse out of "' + clip(ship.text, 60) + '", so `total` '
         + 'is absent rather than wrong. Do not rank this against rows that have one.';
@@ -702,12 +775,26 @@
     const noTotal = rows.filter((r) => r.total == null).length;
     const unknownFormat = rows.filter((r) => r.saleFormat === 'unknown').length;
 
+    const qs = new URLSearchParams(location.search);
+    const filterParams = searchFilterParams(location.search);
+    // The page's own statement of what is applied: only nodes carrying the "Remove filter"
+    // affordance count (which also drops the "Clear All" entry), and the affordance is stripped:
+    // ["Size: L", "Black", "Gray"].
+    const applied = pickAll(SEL.search.applied)
+      .map((e) => txtOf(e) || '')
+      .filter((t) => /Remove filter$/i.test(t))
+      .map((t) => clean(t.replace(/Remove filter$/i, '')))
+      .filter(Boolean);
+
     const out = compact({
+      query: qs.get('_nkw'),
       resultCount: num(pickText(SEL.search.resultCount)),
       shown: rows.length,
       scanned: nodes.length,
       duplicatesDropped: duplicates || undefined,
       rowsWithoutTotal: noTotal || undefined,
+      filterParams: filterParams.length ? filterParams : undefined,
+      appliedFilters: applied.length ? applied : undefined,
       rows: rows,
     }) || {};
 
@@ -735,6 +822,18 @@
     if (noTotal) {
       out._totalWarn = noTotal + ' of ' + rows.length + ' rows have no `total` because shipping '
         + 'could not be read. Do not rank those against rows that have one; open them instead.';
+    }
+    // A facet filter can eat the page: &Size=L&Color=Black%7CGray on a 300-result query rendered
+    // 0 rows with no error and no warning (2026-09-03). It is mechanically detectable — a result
+    // count, no rows, filters on the URL — so detect it, rather than leaving it to whoever
+    // remembers to re-run unfiltered. Zero rows with nothing on the URL is a different failure.
+    if (!rows.length) {
+      out._emptyWarn = (out.resultCount
+          ? 'eBay reports ' + out.resultCount + ' results but rendered 0 rows'
+          : 'No rows and no result count')
+        + (filterParams.length ? ', with filter parameter(s) ' + filterParams.join(', ') + ' on the URL. '
+            + 'A facet filter has eaten the page: drop the filter(s), re-run, and filter in your own analysis.'
+          : '. Run __ebayx.health() — either the results container moved or the page had not finished rendering.');
     }
     return out;
   }
@@ -846,7 +945,7 @@
     // Not part of the caller-facing surface — do not build on it.
     _internals: { clean, clip, money, num, currency, compact, txtOf, pickAll, hoist,
                   itemIdFrom, spans, deA11y, shippingInfo, returnsInfo, discountInfo,
-                  conditionGrade },
+                  conditionGrade, searchFilterParams, SILHOUETTE_RE },
   };
   Object.defineProperty(window, '__ebayx', { value: API, writable: true, configurable: true });
   }
