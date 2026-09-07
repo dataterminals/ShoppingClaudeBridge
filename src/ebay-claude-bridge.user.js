@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopping Claude Bridge — eBay
 // @namespace    https://github.com/dataterminals/ShoppingClaudeBridge
-// @version      0.4.0
+// @version      0.5.0
 // @description  Read-only extractor library for ebay.com. Exposes window.__ebayx so an assistant driving the browser can pull a compact JSON record of the current page instead of reading a 60 KB accessibility tree. Never clicks a control, submits a form, or reads credentials.
 // @author       dataterminals
 // @homepageURL  https://github.com/dataterminals/ShoppingClaudeBridge
@@ -52,7 +52,7 @@
 (function () {
   function __ebayxLib() {
   'use strict';
-  const VERSION = '0.4.0';
+  const VERSION = '0.5.0';
 
   // --8<-- shared core: START. Byte-identical across every *.user.js in src/.
   // Verify with `node tests/core-parity.test.js`. These markers are `//` on purpose:
@@ -70,6 +70,17 @@
     .trim() || null);
 
   const clip = (s, n) => { const c = clean(s); return c && c.length > n ? c.slice(0, n - 1) + '\u2026' : c; };
+
+  // Normalise an attribute NAME. Both marketplaces write one label several ways: a tech-spec
+  // table says "Screen Size", a detail bullet says "Screen Size" wrapped in bidi marks and a
+  // trailing colon (U+200F ... U+200E), an eBay item-specifics label says "Screen Size:".
+  // Those are one attribute and must collide into one key. clean() does not do it — it strips
+  // zero-width joiners, not direction marks, and it has no reason to treat a trailing colon as
+  // punctuation rather than content. Leading marks go too: a key that differs from its twin by
+  // one invisible character is the same bug one character earlier.
+  const specKey = (s) => (clean(s) || '')
+    .replace(/^[\s:\u200E\u200F\u061C]+|[\s:\u200E\u200F\u061C]+$/g, '')
+    .trim();
 
   // First candidate selector that yields an element.
   const pick = (cands, root = document) => {
@@ -574,18 +585,44 @@
     return el ? clip(txtOf(el), 60) : null;
   }
 
-  function specifics() {
+  // A BOUND, NOT A BUDGET, on the same reasoning as the Amazon half's SPEC_CAP: through 0.4.0
+  // this kept the first 30 pairs in DOM order and recorded nothing about the ones it dropped.
+  // The Amazon defect was found live — 74 rows on a TV listing, 30 kept, health() still printing
+  // "0 BROKEN" — and the note that reported it asked whether eBay carried an equivalent cap
+  // rather than assuming it did not. It did, on the line below. No eBay listing seen so far comes
+  // near 30 aspects (16 on the item probed 2026-08-27), so unlike the Amazon case this is a
+  // latent cap and not one measured firing. The bug is the silence, not the number.
+  const SPEC_CAP = 200;
+
+  // One walk, two readers. specifics() keeps returning a plain map, because that is what
+  // conditionValue(), item() and the published __ebayx.specifics() all expect; item() reads the
+  // accounting alongside so it can say when the cap fired instead of returning a short map that
+  // looks like a sparse listing.
+  function specificsWalk() {
     const out = {};
+    const meta = { rowsSeen: 0, kept: 0, dupes: 0, unparsed: 0 };
     for (const sec of pickAll(SEL.item.specSection)) {
       const head = pickText(SEL.item.specHeading, sec) || '';
       if (!/item specifics/i.test(head)) continue;
       for (const col of pickAll(SEL.item.specCol, sec)) {
-        const k = pickText(SEL.item.specLabel, col);
+        meta.rowsSeen++;
+        // specKey() rather than a bare /:$/ strip: it also takes a space before the colon and the
+        // bidi marks, so "Brand" and "Brand :" cannot land as two separate keys. Shared core —
+        // one implementation of that rule across both sites.
+        const k = specKey(pickText(SEL.item.specLabel, col));
         const v = pickText(SEL.item.specValue, col);
-        if (k && v && Object.keys(out).length < 30) out[clean(k).replace(/:$/, '')] = clip(v, 120);
+        if (!k || !v) { meta.unparsed++; continue; }
+        if (k in out) { meta.dupes++; continue; }
+        if (meta.kept >= SPEC_CAP) { meta.truncated = true; continue; }
+        out[k] = clip(v, 120);
+        meta.kept++;
       }
     }
-    return Object.keys(out).length ? out : null;
+    return { out: Object.keys(out).length ? out : null, meta: meta };
+  }
+
+  function specifics() {
+    return specificsWalk().out;
   }
 
   // A bare "100% positive" is the least informative version of this data and it is exactly what
@@ -633,7 +670,8 @@
     const price = money(priceRaw);
     const ship = shippingInfo(pickText(S.shipping));
     const qty = pickText(S.quantity);
-    const spec = specifics();
+    const specWalk = specificsWalk();
+    const spec = specWalk.out;
 
     const rec = compact({
       itemId: id,
@@ -683,6 +721,15 @@
         + 'carrying Style: Ankle was a flare). Typed measurements on the same form (Inseam, Rise, '
         + 'Waist Size) hold up better. Confirm the shape from the photographs: images.description is '
         + 'eBay\'s caption of the first photo, images.url the photo to screenshot.';
+    }
+    if (specWalk.meta.truncated) {
+      rec._specsWarn = 'Item specifics truncated at ' + SPEC_CAP + ' aspects — '
+        + specWalk.meta.rowsSeen + ' were on the page. Aspects past the cap are absent from this '
+        + 'CAPTURE, not from the listing.';
+    } else if (specWalk.meta.rowsSeen && !specWalk.meta.kept) {
+      rec._specsWarn = specWalk.meta.rowsSeen + ' item-specifics columns matched but none '
+        + 'parsed — the label/value structure has moved. condition falls back to this form, so '
+        + 'check it before trusting a blank.';
     }
     if (ship && ship.cost == null) {
       rec._warn = 'Shipping cost did not parse out of "' + clip(ship.text, 60) + '", so `total` '
@@ -879,7 +926,7 @@
       : t === 'search' ? { search: SEL.search }
       : { item: SEL.item, search: SEL.search };
     const report = { version: VERSION, pageType: t, url: location.href.split('?')[0],
-                     ok: [], absent: [], broken: [] };
+                     ok: [], absent: [], broken: [], degraded: [] };
     for (const gname of Object.keys(groups)) {
       const g = groups[gname];
       for (const field of Object.keys(g)) {
@@ -915,9 +962,24 @@
         if (spec && spec.Condition) report.ok.push('item.condition (recovered from item specifics)');
         else report.broken.push('item.condition (no slot AND no specifics entry — genuinely gone)');
       }
+      // Coverage, not resolution. specSection resolving says nothing about whether the aspects
+      // inside it reached the record — that gap is what hid a 30-key cap on the Amazon half for
+      // seven releases while health() reported a clean bill.
+      const sm = specificsWalk().meta;
+      const bad = sm.truncated ? 'the ' + SPEC_CAP + '-aspect cap fired'
+        : (sm.rowsSeen && !sm.kept) ? 'columns matched but none parsed'
+        : (sm.unparsed > sm.kept) ? sm.unparsed + ' of ' + sm.rowsSeen + ' columns yielded no pair'
+        : null;
+      const cov = { check: 'item.specifics coverage', rowsSeen: sm.rowsSeen, keysKept: sm.kept,
+                    dupes: sm.dupes, unparsed: sm.unparsed };
+      if (bad) { cov.why = bad; report.degraded.push(cov); }
+      else if (sm.rowsSeen) report.ok.push('item.specifics coverage (' + sm.kept + ' of '
+        + sm.rowsSeen + ' columns kept)');
+      report.coverage = cov;
     }
     report.summary = report.ok.length + ' ok, ' + report.absent.length
-      + ' absent-but-optional, ' + report.broken.length + ' BROKEN';
+      + ' absent-but-optional, ' + report.broken.length + ' BROKEN, '
+      + report.degraded.length + ' DEGRADED';
     return report;
   }
 
@@ -945,7 +1007,7 @@
     // Not part of the caller-facing surface — do not build on it.
     _internals: { clean, clip, money, num, currency, compact, txtOf, pickAll, hoist,
                   itemIdFrom, spans, deA11y, shippingInfo, returnsInfo, discountInfo,
-                  conditionGrade, searchFilterParams, SILHOUETTE_RE },
+                  conditionGrade, searchFilterParams, SILHOUETTE_RE, specKey, SPEC_CAP },
   };
   Object.defineProperty(window, '__ebayx', { value: API, writable: true, configurable: true });
   }

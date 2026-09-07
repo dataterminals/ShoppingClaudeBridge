@@ -30,7 +30,10 @@ if (!amzx) {
 }
 const { clean, clip, money, num, currency, compact, asinFrom, txtOf, unitPrice,
         couponInfo, condition, purchaseMode, chartFromGrid, chartDiff, cellVal,
-        fullImage } = amzx._internals;
+        fullImage, specKey, specCollector, SPEC_CAP } = amzx._internals;
+
+// The extractor's own text, for the two assertions below that pin a defect rather than a value.
+const SRC_TEXT = fs.readFileSync(SRC, 'utf8');
 
 let passed = 0;
 const failures = [];
@@ -284,6 +287,131 @@ eq('fullImage strips the crop suffix',
 eq('fullImage leaves a plain url alone', fullImage('https://m.media-amazon.com/images/I/abc.jpg'),
    'https://m.media-amazon.com/images/I/abc.jpg');
 eq('fullImage null', fullImage(null), null);
+
+
+/* --------------------------------------------------------------- specs() ---
+ * The 0.7.0 defect these pin, measured live on B094RJ41WY (a VIZIO D24f-J09) on 2026-09-04:
+ * the page carried 74 unique spec rows, specs() returned 30 of them in DOM order, and NOTHING
+ * said so — _missing absent, _warn absent, health() printing "0 BROKEN" because it only asked
+ * whether specRows resolved. It resolved 74 times. "Video Encoding: H.264, H.265 (HEVC), or
+ * VP9" sat at row 39 and was thrown away, which is the row that decides whether the panel can
+ * play the file you have.
+ *
+ * The DOM walk needs a browser and is verified live (rule 5). The accounting does not, and the
+ * accounting is what turns a silent cap into a loud one, so it is pinned here.
+ */
+
+/* specKey() — shared core, so the same cases run in tests/ebay-parse.test.js. */
+eq('specKey plain', specKey('Screen Size'), 'Screen Size');
+eq('specKey trailing colon', specKey('Screen Size:'), 'Screen Size');
+eq('specKey spaced colon', specKey('Screen Size :'), 'Screen Size');
+// Amazon's real detail-bullet label: RLM, colon, LRM. Through 0.7.0 only the bullet path
+// stripped these, so the table's "Screen Size" and the bullet's could not collide.
+eq('specKey bidi-wrapped label', specKey('Date First Available \u200F : \u200E'), 'Date First Available');
+eq('specKey leading mark', specKey('\u200EBrand'), 'Brand');
+eq('specKey arabic letter mark', specKey('Brand\u061C:'), 'Brand');
+eq('specKey collapses the table and bullet forms into ONE key',
+   specKey('Screen Size') === specKey('Screen Size \u200F : \u200E'), true);
+eq('specKey leaves an interior colon alone', specKey('Aspect Ratio: 16:9'), 'Aspect Ratio: 16:9');
+eq('specKey null', specKey(null), '');
+
+/* specCollector() — one bucket per row, and the cap announces itself. */
+{
+  const c = specCollector();
+  c.add('Screen Size', '24 Inches', 'table');
+  c.add('Brand', 'VIZIO', 'overview');
+  eq('collector keeps distinct keys', c.out, { 'Screen Size': '24 Inches', Brand: 'VIZIO' });
+  eq('collector counts rows and keeps', [c.meta.rowsSeen, c.meta.kept], [2, 2]);
+  eq('collector tallies which source paid for what', c.meta.sources, { table: 1, overview: 1 });
+}
+{
+  const c = specCollector();
+  c.add('Brand', 'VIZIO', 'table');
+  c.add('Brand', 'Vizio Inc', 'overview');
+  eq('first writer wins', c.out.Brand, 'VIZIO');
+  eq('the duplicate is counted, not silently gone', [c.meta.kept, c.meta.dupes], [1, 1]);
+}
+{
+  const c = specCollector();
+  c.add(null, null, 'table');            // a row with fewer than two cells
+  c.add('Key', null, 'table');           // a cell that held no text
+  c.add('x'.repeat(61), 'v', 'table');   // prose that is not an attribute name
+  eq('rows that yield no pair are counted as unparsed', c.meta.unparsed, 3);
+  eq('and none of them reach the map', c.meta.kept, 0);
+}
+{
+  // THE defect. A cap may exist; a cap may not be silent.
+  const c = specCollector(2);
+  for (const k of ['A', 'B', 'C', 'D']) c.add(k, k.toLowerCase(), 'table');
+  eq('the cap stops at its limit', Object.keys(c.out), ['A', 'B']);
+  eq('and SAYS that it fired', c.meta.truncated, true);
+  eq('and counts what it cost', c.meta.overCap, 2);
+}
+{
+  const c = specCollector();
+  c.add('A', 'a', 'table');
+  eq('an untriggered cap leaves no flag to read', c.meta.truncated, undefined);
+  eq('and nothing over it', c.meta.overCap, 0);
+}
+{
+  const c = specCollector();
+  c.add('Customer Reviews', '4.5 4.5 out of 5 stars 1,234 ratings', 'table');
+  eq('the row that is literally rating.stars + rating.count is skipped', c.meta.skipped, 1);
+  eq('and does not reach the map', c.out['Customer Reviews'], undefined);
+}
+{
+  // Deliberately NOT skipped. Nothing else in the product record carries a sales rank, so
+  // dropping this would delete a real attribute — the failure specs() exists to stop committing.
+  const c = specCollector();
+  c.add('Best Sellers Rank', '#1,234 in Electronics', 'table');
+  eq('Best Sellers Rank survives', c.out['Best Sellers Rank'], '#1,234 in Electronics');
+}
+{
+  // The invariant health() leans on: every row is accounted for exactly once, which is what
+  // lets the coverage probe say "74 seen, 74 kept" and mean it.
+  const c = specCollector(2);
+  c.add('A', '1', 'table');
+  c.add('A', '1', 'overview');                       // dupe
+  c.add('Customer Reviews', 'x', 'table');           // skipped
+  c.add(null, null, 'table');                        // unparsed
+  c.add('B', '2', 'table');                          // kept
+  c.add('C', '3', 'table');                          // over cap
+  const m = c.meta;
+  eq('every row lands in exactly one bucket',
+     m.kept + m.dupes + m.skipped + m.unparsed + m.overCap, m.rowsSeen);
+}
+{
+  const c = specCollector();
+  c.add('A', 'x'.repeat(400), 'table');
+  eq('values are clipped', c.out.A.length, 160);
+}
+
+/* The cap itself, and the two shapes of the old bug, pinned in the source text. */
+eq('SPEC_CAP is a bound, not a budget', SPEC_CAP >= 200, true);
+eq('no 30-key cap survives in the extractor',
+   /Object\.keys\(out\)\.length < 30/.test(SRC_TEXT), false);
+// Amazon nests detail bullets: <li><span class="a-list-item"><span class="a-text-bold">Key</span>
+// <span>Value</span></span></li>. A flat sweep returns the WRAPPER at [0], so reading [0]/[1]
+// off it yields the key "ASIN : B07DC5PPFV" mapped to the value "ASIN :" — wrong in both
+// halves. It never fired only because that path ran solely when the table path returned nothing.
+// Match the assignment, not the bare call: the comment in specs() that explains why the flat
+// sweep is wrong quotes the pattern, and a guard that trips on its own documentation is noise.
+eq('detail bullets are not read with a flat span sweep',
+   /const spans = \$\$\('span', li\)/.test(SRC_TEXT), false);
+eq('and the direct-children reader that replaced it is in place',
+   /bulletCells/.test(SRC_TEXT), true);
+
+/* The registry entries the merge depends on. */
+eq('the overview grid is its own source, not a brand-only row',
+   Array.isArray(amzx.SEL.product.overviewRows), true);
+eq('the div-based product-facts accordion has a source',
+   Array.isArray(amzx.SEL.product.factsRows), true);
+eq('the facts row class is primary, ahead of the generic grid',
+   /product-facts-detail/.test(amzx.SEL.product.factsRows[0]), true);
+// pickAll returns the first candidate that matches ANYTHING, so a single list holding both
+// would read the tables and never reach the overview grid.
+eq('the overview grid is NOT concatenated into specRows',
+   amzx.SEL.product.specRows.some((c) => /productOverview/.test(c)), false);
 
 /* ------------------------------------------------------- surface check --- */
 for (const fn of ['page', 'product', 'search', 'reviews', 'offers', 'buyAgain',

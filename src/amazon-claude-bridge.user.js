@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shopping Claude Bridge — Amazon
 // @namespace    https://github.com/dataterminals/ShoppingClaudeBridge
-// @version      0.7.0
+// @version      0.8.0
 // @description  Read-only extractor library for amazon.com. Exposes window.__amzx so an assistant driving the browser can pull a compact, de-sponsored JSON record of the current page instead of reading a 60 KB accessibility tree. Never clicks a buy control, submits a form, or reads credentials.
 // @author       dataterminals
 // @homepageURL  https://github.com/dataterminals/ShoppingClaudeBridge
@@ -58,7 +58,7 @@
 (function () {
   function __amzxLib() {
   'use strict';
-  const VERSION = '0.7.0';
+  const VERSION = '0.8.0';
 
   // --8<-- shared core: START. Byte-identical across every *.user.js in src/.
   // Verify with `node tests/core-parity.test.js`. These markers are `//` on purpose:
@@ -76,6 +76,17 @@
     .trim() || null);
 
   const clip = (s, n) => { const c = clean(s); return c && c.length > n ? c.slice(0, n - 1) + '\u2026' : c; };
+
+  // Normalise an attribute NAME. Both marketplaces write one label several ways: a tech-spec
+  // table says "Screen Size", a detail bullet says "Screen Size" wrapped in bidi marks and a
+  // trailing colon (U+200F ... U+200E), an eBay item-specifics label says "Screen Size:".
+  // Those are one attribute and must collide into one key. clean() does not do it — it strips
+  // zero-width joiners, not direction marks, and it has no reason to treat a trailing colon as
+  // punctuation rather than content. Leading marks go too: a key that differs from its twin by
+  // one invisible character is the same bug one character earlier.
+  const specKey = (s) => (clean(s) || '')
+    .replace(/^[\s:\u200E\u200F\u061C]+|[\s:\u200E\u200F\u061C]+$/g, '')
+    .trim();
 
   // First candidate selector that yields an element.
   const pick = (cands, root = document) => {
@@ -348,12 +359,26 @@
                    '[data-feature-name="acBadge"] .a-badge-text'],
       badgeBest:  ['#zeitgeistBadge_feature_div .badge-text', '#zeitgeistBadge_feature_div a',
                    '.badge-wrapper .best-seller-badge'],
-      brandRow:   ['#productOverview_feature_div tr'],
+      // The product-overview grid. Named for the region rather than for Brand, because it is
+      // read twice: brandName() wants the one row labelled Brand, and specs() takes the whole
+      // grid. Through 0.7.0 this was 'brandRow' and nine of its ten rows were thrown away —
+      // on a listing where the big tables repeat them that costs nothing, and on one where
+      // they do not it is the only place the summary attributes exist.
+      overviewRows:['#productOverview_feature_div tr'],
       specRows:   ['.prodDetTable tr',
                    '#productDetails_techSpec_section_1 tr',
+                   '#productDetails_techSpec_section_2 tr',
                    '#productDetails_detailBullets_sections1 tr',
+                   '#productDetails_db_sections tr',
                    '#technicalSpecifications_section_1 tr'],
       detailList: ['#detailBullets_feature_div li', '#detailBulletsWrapper_feature_div li'],
+      // The div-based accordion apparel and many newer listings use instead of a table — no
+      // <tr> anywhere in it, so specRows cannot see it. Most-specific first: the row class is
+      // the durable anchor, and '#productFactsDesktopExpander .a-fixed-left-grid' can also
+      // match an outer grid wrapping the rows, which yields the first row's pair a second time.
+      // Harmless (first writer wins, and meta counts it as a duplicate) but not the primary.
+      factsRows:  ['.product-facts-detail',
+                   '#productFactsDesktopExpander .a-fixed-left-grid'],
       asinInput:  ['#ASIN', 'input[name="ASIN"]', '#asin'],
     },
     search: {
@@ -527,7 +552,7 @@
   // rather than `broken`, so a genuine selector break is not buried in expected noise.
   const OPTIONAL = new Set([
     'wasPrice', 'unitPrice', 'coupon', 'badgeChoice', 'badgeBest', 'delivery', 'byline',
-    'detailList', 'brandRow', 'thumb', 'link', 'badge', 'rVerified', 'rHelpful',
+    'detailList', 'overviewRows', 'factsRows', 'thumb', 'link', 'badge', 'rVerified', 'rHelpful',
     // A review names its variant only on variation listings; a pager exists only on the reviews page.
     'rFormat', 'pagination',
     // Most of the catalogue has no size chart of any kind. On apparel, charts() says which.
@@ -585,25 +610,110 @@
 
   /* --------------------------------------------------------------- product */
 
-  function specs() {
+  // A BOUND, NOT A BUDGET. Through 0.7.0 this was 30, applied in DOM order, and nothing recorded
+  // that it had fired. Amazon renders a TV's spec tables display-first, so on B094RJ41WY (a VIZIO
+  // D24f-J09, 74 unique rows across twelve tables) the thirty slots went on five different ways of
+  // saying "1080p 60 Hz panel" — Resolution, Refresh Rate, Display Refresh Rate in Hertz, Display
+  // Technology, Screen Size — and everything from row 31 was discarded. That included "Video
+  // Encoding: H.264, H.265 (HEVC), or VP9" at row 39, which is the row that decides whether the
+  // panel can play the file you have, plus the HDMI port count, the connectivity list and the
+  // model number. _missing stayed quiet, _warn stayed quiet, and health() printed "0 BROKEN"
+  // because it asks whether specRows RESOLVES — and it resolved beautifully, 74 times.
+  //
+  // A silent cap is indistinguishable from a page that genuinely has 30 attributes. 200 exists
+  // only so a pathological page cannot return a megabyte; when it fires it says so, loudly, and
+  // then DOM order is still the wrong tiebreak — which is the argument for not having a budget
+  // rather than for spending one more cleverly.
+  const SPEC_CAP = 200;
+
+  // "Customer Reviews" arrives as "4.5 4.5 out of 5 stars 1,234 ratings" — rating.stars and
+  // rating.count spelled out, and the one spec row genuinely already in the record.
+  // Best Sellers Rank is NOT in the record anywhere, so despite being the obvious second
+  // candidate for this list it stays: dropping it would delete a real attribute, which is the
+  // failure this whole function exists to stop committing.
+  const SPEC_SKIP = /^customer reviews$/i;
+
+  // Through 0.7.0 only the bullet path normalised attribute names, so "Screen Size" from a table
+  // and the bidi-wrapped "Screen Size :" from a bullet could not collide and the second would
+  // have been stored as a separate, near-identical key. specKey() (shared core) now does it for
+  // every path.
+
+  // The accounting half of specs(), kept apart from the DOM walk so node can test it.
+  // Every row that goes in lands in EXACTLY ONE bucket —
+  //     rowsSeen === kept + dupes + skipped + unparsed + overCap
+  // — which is what lets health() say "74 rows seen, 74 kept" and mean it. dupes and skipped are
+  // benign and expected (the overview grid repeats the big tables on most listings); unparsed and
+  // overCap are not, and health() reads exactly those two.
+  function specCollector(cap) {
+    const limit = cap == null ? SPEC_CAP : cap;
     const out = {};
-    for (const tr of pickAll(SEL.product.specRows)) {
-      const k = txtOf($('th', tr));
-      const v = txtOf($('td', tr));
-      if (k && v && Object.keys(out).length < 30) out[k] = clip(v, 120);
-    }
-    // Older layout: "Key : Value" inside a bullet list with two nested spans.
-    if (!Object.keys(out).length) {
-      for (const li of pickAll(SEL.product.detailList)) {
-        const spans = $$('span', li);
-        if (spans.length >= 2) {
-          const k = (clean(spans[0].textContent) || '').replace(/[\s:\u200E\u200F]+$/, '');
-          const v = clean(spans[1].textContent);
-          if (k && v && k.length < 60 && Object.keys(out).length < 30) out[k] = clip(v, 120);
-        }
+    const meta = { rowsSeen: 0, kept: 0, dupes: 0, skipped: 0, unparsed: 0, overCap: 0, sources: {} };
+    return {
+      out: out,
+      meta: meta,
+      // Call once per candidate row, whatever came of it. k and v may be null.
+      add: function (k, v, src) {
+        meta.rowsSeen++;
+        if (!k || !v || k.length > 60) { meta.unparsed++; return; }
+        if (SPEC_SKIP.test(k)) { meta.skipped++; return; }
+        if (k in out) { meta.dupes++; return; }              // first writer wins
+        if (Object.keys(out).length >= limit) { meta.overCap++; meta.truncated = true; return; }
+        out[k] = clip(v, 160);
+        meta.kept++;
+        meta.sources[src] = (meta.sources[src] || 0) + 1;
+      },
+    };
+  }
+
+  // Merge every source. The second half of the 0.7.0 bug was that the detail-bullet path ran only
+  // when the table path returned LITERALLY ZERO keys, so a listing carrying both a small tech-spec
+  // table and a bullet list got the table and never looked at the bullets — partial capture,
+  // reported as complete. The sources are complementary, not alternatives.
+  //
+  // Each source gets its OWN pickAll, and that is not stylistic: pickAll returns every element for
+  // the FIRST candidate that matches anything, so a single list holding both '.prodDetTable tr'
+  // and '#productOverview_feature_div tr' reads the tables and never reaches the overview grid.
+  // Concatenating the two registries would look like it promoted the overview rows and would
+  // change nothing on any page that has a spec table.
+  function specs() {
+    const c = specCollector();
+
+    // Cells by descendant selector — right for <tr>, whose cells are its children, and for the
+    // product-facts grid, whose two columns are grandchildren of the row.
+    const cellsBy = (sel) => (row) => $$(sel, row);
+
+    // NOT that shape for detail bullets. Amazon nests them:
+    //   <li><span class="a-list-item"><span class="a-text-bold">ASIN : </span>
+    //       <span>B07DC5PPFV</span></span></li>
+    // so a flat $$('span', li) returns the WRAPPER first, and reading [0]/[1] off it yields the
+    // key "ASIN : B07DC5PPFV" mapped to the value "ASIN :" — wrong in both halves. That has been
+    // in the file since 0.1.0 and never fired, because this path only ran when the table path
+    // returned nothing at all. Merging it into every capture is precisely the change that would
+    // have made it live, so take the holder's direct children instead. Both layouts are covered:
+    // with no .a-list-item wrapper the <li> is the holder and its own spans are the pair.
+    const bulletCells = (li) => {
+      const holder = $('.a-list-item', li) || li;
+      const kids = [];
+      for (const el of holder.children || []) if (el.tagName === 'SPAN') kids.push(el);
+      return kids;
+    };
+
+    const walk = (rows, cellsOf, src) => {
+      for (const row of rows) {
+        const cells = cellsOf(row);
+        const pair = cells.length >= 2;
+        c.add(pair ? specKey(txtOf(cells[0])) : null, pair ? txtOf(cells[1]) : null, src);
       }
-    }
-    return out;
+    };
+
+    // 'th,td' rather than $('th') + $('td'): the overview grid pairs two <td>s and carries no
+    // <th> at all, so the old form read every one of its rows as unparsable.
+    walk(pickAll(SEL.product.specRows), cellsBy('th,td'), 'table');
+    walk(pickAll(SEL.product.overviewRows), cellsBy('th,td'), 'overview');
+    walk(pickAll(SEL.product.detailList), bulletCells, 'bullets');
+    walk(pickAll(SEL.product.factsRows), cellsBy('.a-fixed-left-grid-col'), 'facts');
+
+    return { specs: c.out, meta: c.meta };
   }
 
   function ratingValue() {
@@ -627,7 +737,7 @@
   function brandName() {
     const byline = pickText(SEL.product.byline);
     if (byline) return byline.replace(/^(Visit the |Brand: )/i, '').replace(/ Store$/i, '');
-    for (const tr of pickAll(SEL.product.brandRow)) {
+    for (const tr of pickAll(SEL.product.overviewRows)) {
       const cells = $$('td,th', tr);
       if (cells.length >= 2 && /^brand$/i.test(txtOf(cells[0]) || '')) return txtOf(cells[1]);
     }
@@ -639,6 +749,7 @@
     const asinEl = pick(S.asinInput);
     const asin = clean(asinEl ? asinEl.value : null) || asinFrom(location.href);
     const priceRaw = pickText(S.price);
+    const spec = specs();
     const rec = {
       asin,
       url: dpUrl(asin) || location.href.split('?')[0],
@@ -669,11 +780,28 @@
       ]),
       category: clip($$(S.breadcrumb[0] + ' a').map((a) => clean(a.textContent)).filter(Boolean).join(' > '), 120),
       bullets: pickAll(S.bullets).map((e) => clip(e.textContent, 160)).filter(Boolean).slice(0, 8),
-      specs: specs(),
+      specs: spec.specs,
       image: pickAttr(S.image, 'data-old-hires') || pickAttr(S.image, 'src'),
     };
+    // The capture's own account of what it did with the spec rows, carried only when it is
+    // interesting: the cap fired, or rows were on the page and none of them survived. On a
+    // healthy listing this is silent and costs nothing, which is the point — a field that is
+    // always present is one the reader stops seeing.
+    if (spec.meta.truncated || (spec.meta.kept === 0 && spec.meta.rowsSeen > 0)) {
+      rec.specsMeta = spec.meta;
+    }
+    if (spec.meta.truncated) {
+      rec._specsWarn = 'specs truncated at ' + SPEC_CAP + ' keys \u2014 ' + spec.meta.rowsSeen
+        + ' rows were present on the page. Fields after the cap are absent from this CAPTURE, '
+        + 'not from the listing. Do not report an attribute as missing on this basis.';
+    } else if (spec.meta.kept === 0 && spec.meta.rowsSeen > 0) {
+      rec._specsWarn = spec.meta.rowsSeen + ' spec rows matched but none parsed \u2014 the cell '
+        + 'structure has moved. Every attribute on this page is absent from the capture.';
+    }
     // Say what is missing rather than letting the caller assume absence means "not applicable".
-    const want = ['title', 'price', 'rating', 'availability', 'soldBy'];
+    // `specs` is in this list so that an empty map reads as a hole rather than as a product that
+    // simply has no attributes; compact() will have dropped the key entirely by then.
+    const want = ['title', 'price', 'rating', 'availability', 'soldBy', 'specs'];
     const missing = want.filter((k) => {
       const v = rec[k];
       return !v || (typeof v === 'object' && !Object.keys(v).length);
@@ -1413,7 +1541,7 @@
     // exactly the failure that went unreported through 0.6.0 because this loop never looked.
     if (t === 'product' && pick(SEL.reviews.ratingsTotal)) groups.reviews = SEL.reviews;
     const report = { version: VERSION, pageType: t, url: location.href.split('?')[0],
-                     ok: [], absent: [], broken: [] };
+                     ok: [], absent: [], broken: [], degraded: [] };
     for (const gname of Object.keys(groups)) {
       const g = groups[gname];
       for (const field of Object.keys(g)) {
@@ -1430,8 +1558,33 @@
         }
       }
     }
+    // COVERAGE, NOT RESOLUTION. The loop above asks whether a selector matches something; it
+    // cannot ask whether what it matched survived into the record, and those are different
+    // questions. On B094RJ41WY through 0.7.0 specRows matched 74 rows, 30 were kept, and this
+    // function printed "0 BROKEN" — a green report on a page where 60% of the attributes were on
+    // the floor, which is the thing that let the cap sit there unnoticed. So run the extractor
+    // and compare what went in with what came out.
+    //
+    // dupes and skipped are NOT degradation: the overview grid repeats the big tables on most
+    // listings, and a warning that fires on every healthy page is one the reader learns to skip —
+    // the same cry-wolf failure as the old always-on _dilution. Only three things count:
+    // the cap fired, nothing survived, or more rows failed to parse than succeeded.
+    if (groups.product) {
+      const m = specs().meta;
+      const bad = m.truncated ? 'the ' + SPEC_CAP + '-key cap fired'
+        : (m.kept === 0 && m.rowsSeen > 0) ? 'rows matched but none parsed'
+        : (m.unparsed > m.kept) ? m.unparsed + ' of ' + m.rowsSeen + ' rows yielded no key/value pair'
+        : null;
+      const cov = { check: 'product.specs coverage', rowsSeen: m.rowsSeen, keysKept: m.kept,
+                    dupes: m.dupes, skipped: m.skipped, unparsed: m.unparsed, sources: m.sources };
+      if (bad) { cov.why = bad; report.degraded.push(cov); }
+      else if (m.rowsSeen) report.ok.push('product.specs coverage (' + m.kept + ' of '
+        + m.rowsSeen + ' rows kept)');
+      report.coverage = cov;
+    }
     report.summary = report.ok.length + ' ok, ' + report.absent.length
-      + ' absent-but-optional, ' + report.broken.length + ' BROKEN';
+      + ' absent-but-optional, ' + report.broken.length + ' BROKEN, '
+      + report.degraded.length + ' DEGRADED';
     return report;
   }
 
@@ -1462,7 +1615,8 @@
     // Not part of the caller-facing surface — do not build on it.
     _internals: { clean, clip, money, num, currency, compact, asinFrom, txtOf, unitPrice,
                   pickAll, hoist, couponInfo, condition, purchaseMode,
-                  chartFromGrid, chartDiff, cellVal, fullImage },
+                  chartFromGrid, chartDiff, cellVal, fullImage,
+                  specKey, specCollector, SPEC_CAP, SPEC_SKIP },
   };
   Object.defineProperty(window, '__amzx', { value: API, writable: true, configurable: true });
   }

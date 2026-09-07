@@ -32,7 +32,10 @@ if (!ebayx) {
   process.exit(1);
 }
 const { itemIdFrom, spans, deA11y, shippingInfo, returnsInfo, discountInfo,
-        conditionGrade, money, num, searchFilterParams, SILHOUETTE_RE } = ebayx._internals;
+        conditionGrade, money, num, searchFilterParams, SILHOUETTE_RE,
+        specKey, SPEC_CAP } = ebayx._internals;
+
+const SRC_TEXT = fs.readFileSync(SRC, 'utf8');
 
 let passed = 0;
 const failures = [];
@@ -200,6 +203,27 @@ for (const k of ['Style', 'Leg Style', 'Silhouette', 'Fit', 'style']) {
 for (const k of ['Inseam', 'Rise', 'Waist Size', 'Size', 'Size Type', 'Type', 'Style Code', 'Fit Type']) {
   eq('key ' + k + ' is not flagged', SILHOUETTE_RE.test(k), false);
 }
+
+
+/* ------------------------------------------------- item specifics cap ---
+ * The Amazon half shipped a silent 30-key cap through 0.7.0 — 74 rows on a TV listing, 30 kept,
+ * health() reporting a clean bill. The note that found it flagged that __ebayx builds specifics
+ * from a different structure and had not been examined. It had the same cap, on the same shape
+ * of line. No eBay listing seen so far comes close to 30 aspects, so this one is latent rather
+ * than measured firing — which is why it needs a test rather than a war story.
+ */
+eq('SPEC_CAP is a bound, not a budget', SPEC_CAP >= 200, true);
+eq('no 30-key cap survives in the extractor',
+   /Object\.keys\(out\)\.length < 30/.test(SRC_TEXT), false);
+
+/* specKey() lives in the shared core, so these are the same cases the Amazon suite runs — that
+ * is the point: one implementation of "Brand" and "Brand :" being one attribute. */
+eq('specKey trailing colon', specKey('Brand:'), 'Brand');
+eq('specKey spaced colon', specKey('US Shoe Size :'), 'US Shoe Size');
+eq('specKey bidi-wrapped label', specKey('Brand \u200F : \u200E'), 'Brand');
+eq('specKey collapses both forms into ONE key', specKey('Brand') === specKey('Brand:'), true);
+eq('specKey leaves an interior colon alone', specKey('Ratio: 16:9'), 'Ratio: 16:9');
+eq('specKey null', specKey(null), '');
 
 /* ------------------------------------------------------------- API surface */
 
